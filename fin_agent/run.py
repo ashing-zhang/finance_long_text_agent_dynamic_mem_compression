@@ -69,7 +69,7 @@ def load_app_config(path: Path) -> AppConfig:
     questions_subdir = Path(data.get("run", {}).get("questions_subdir", "questions/group_a"))
     raw_docs_subdir = Path(data.get("run", {}).get("raw_docs_subdir", "raw"))
     split = str(data.get("run", {}).get("split", "A"))
-    output_csv = Path(data.get("run", {}).get("output_csv", "answer.csv"))
+    output_csv = Path(data.get("run", {}).get("output_csv", "outputs/answer.csv"))
     evidence_jsonl = data.get("run", {}).get("output_evidence_jsonl")
     output_evidence_jsonl = Path(evidence_jsonl) if evidence_jsonl else None
 
@@ -80,9 +80,14 @@ def load_app_config(path: Path) -> AppConfig:
     max_retries = int(data.get("llm", {}).get("max_retries", 2))
 
     chunk_max_chars = int(data.get("retrieval", {}).get("chunk_max_chars", 1600))
-    top_k_chunks = int(data.get("retrieval", {}).get("top_k_chunks", 6))
-    max_context_chars = int(data.get("retrieval", {}).get("max_context_chars", 8000))
+    doc_top_k = int(data.get("retrieval", {}).get("doc_top_k", 3))
     per_doc_top_k = int(data.get("retrieval", {}).get("per_doc_top_k", 3))
+    per_option_top_k = int(data.get("retrieval", {}).get("per_option_top_k", 5))
+    top_k_chunks = int(data.get("retrieval", {}).get("top_k_chunks", 12))
+    coarse_doc_window_chars = int(data.get("retrieval", {}).get("coarse_doc_window_chars", 2400))
+    refine_context_chars = int(data.get("retrieval", {}).get("refine_context_chars", 12000))
+    max_context_chars = int(data.get("retrieval", {}).get("max_context_chars", 9000))
+    max_routing_rounds = int(data.get("retrieval", {}).get("max_routing_rounds", 2))
 
     log_level = str(data.get("log_level", "INFO"))
 
@@ -103,9 +108,14 @@ def load_app_config(path: Path) -> AppConfig:
     )
     retrieval = RetrievalConfig(
         chunk_max_chars=chunk_max_chars,
-        top_k_chunks=top_k_chunks,
-        max_context_chars=max_context_chars,
+        doc_top_k=doc_top_k,
         per_doc_top_k=per_doc_top_k,
+        per_option_top_k=per_option_top_k,
+        top_k_chunks=top_k_chunks,
+        coarse_doc_window_chars=coarse_doc_window_chars,
+        refine_context_chars=refine_context_chars,
+        max_context_chars=max_context_chars,
+        max_routing_rounds=max_routing_rounds,
     )
     return AppConfig(run=run, llm=llm, retrieval=retrieval, log_level=log_level)
 

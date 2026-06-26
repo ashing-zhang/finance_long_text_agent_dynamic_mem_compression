@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from fin_agent.application.domain_specialists import build_domain_supplement
 from fin_agent.domain.models import (
     AnswerFormat,
     AnswerRecord,
@@ -17,13 +18,53 @@ from fin_agent.domain.models import (
     RunConfig,
     TokenUsage,
 )
-from fin_agent.infrastructure.data_access import DocumentRepository, QuestionRepository
+from fin_agent.infrastructure.data_access import (
+    DocumentRepository,
+    QuestionRepository,
+)
 from fin_agent.infrastructure.llm.openai_compatible_client import (
     ChatMessage,
     OpenAiCompatibleChatClient,
 )
 
 logger = logging.getLogger(__name__)
+
+DOMAIN_SYNONYMS: dict[str, dict[str, list[str]]] = {
+    "insurance": {
+        "退保": ["解除保险合同", "现金价值", "退保金额", "保单账户价值"],
+        "身故": ["身故保险金", "基本保险金额", "已交保费", "现金价值"],
+        "领取": ["养老年金", "给付", "年金领取"],
+    },
+    "regulatory": {
+        "受益所有人": ["受益人识别", "受益所有人识别", "备案信息"],
+        "客户尽职调查": ["身份资料", "交易记录保存", "尽职调查"],
+        "担保": ["股东大会", "特别决议", "普通决议"],
+    },
+    "financial_contracts": {
+        "发行": ["发行规模", "募集说明书", "发行人"],
+        "评级": ["主体信用评级", "债项评级", "AAA"],
+        "赎回": ["回售", "违约责任", "受托管理人"],
+    },
+    "financial_reports": {
+        "营业收入": ["收入", "营收", "营业总收入"],
+        "净利润": ["归属于上市公司股东的净利润", "利润总额"],
+        "现金流": ["经营活动产生的现金流量净额", "现金流量净额"],
+        "研发投入": ["研发费用", "研发投入占营业收入比例"],
+    },
+    "research": {
+        "行业趋势": ["景气度", "市场空间", "需求变化"],
+        "公司比较": ["对比", "竞争格局", "盈利预测"],
+        "观点": ["核心结论", "投资建议", "催化因素"],
+    },
+}
+
+DOMAIN_PROMPT_HINTS: dict[str, str] = {
+    "insurance": "保险题优先核对公式、给付条件、已交保费、现金价值与账户价值。",
+    "regulatory": "监管题优先核对法条编号、施行日期、时限、比例与决议类型。",
+    "financial_contracts": "金融合同题优先核对发行主体、评级、发行规模、受托管理人与条款引用。",
+    "financial_reports": "财报题优先进行跨年度口径核对，必要时对比 2025 年报中的上年同期与 2024 年报本期。",
+    "research": "研报题允许适度保留上下文，重点核对结论、对比关系与图表附近说明。",
+}
 
 
 def configure_logging(level: str = "INFO") -> None:
@@ -42,8 +83,27 @@ class EvaluationResult:
     total_usage: TokenUsage
 
 
+@dataclass(frozen=True, slots=True)
+class QueryFeatures:
+    """题目与选项特征。"""
+
+    years: tuple[str, ...]
+    numbers: tuple[str, ...]
+    clauses: tuple[str, ...]
+    keywords: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalPlan:
+    """检索计划。"""
+
+    global_query: str
+    option_queries: dict[str, str]
+    features: QueryFeatures
+
+
 class FinanceLongTextAgent:
-    """金融长文本问答 Agent（检索 + 压缩 + 受控输出）。"""
+    """金融长文本问答 Agent（文档级粗筛 + 选项级召回 + 严格推理）。"""
 
     def __init__(
         self,
@@ -58,143 +118,487 @@ class FinanceLongTextAgent:
 
     def answer(self, q: Question) -> tuple[AnswerRecord, list[EvidenceSnippet]]:
         """回答单题，返回 answer.csv 行与证据片段。"""
-        doc_ids = q.doc_ids or self._docs.list_doc_ids(q.domain)
-        if not doc_ids:
-            logger.warning("题目无 doc_ids 且无法枚举领域文档：%s", q.qid)
+        plan = self._build_retrieval_plan(q)
+        doc_ids = self._select_candidate_docs(q, plan)
+        evidence = self._retrieve_evidence(q, doc_ids, plan)
+        context, refine_usage = self._build_context(q, plan, doc_ids, evidence)
 
-        query = self._build_query(q)
-        evidence = self._retrieve_evidence(domain=q.domain, doc_ids=doc_ids, query=query)
-        context = self._build_context(query=query, evidence=evidence)
-        messages = self._build_messages(q=q, context=context)
-
-        resp = self._llm.chat(messages)
+        resp = self._llm.chat(self._build_messages(q=q, context=context))
         answer = self._normalize_answer(q.answer_format, resp.content)
-        record = AnswerRecord(qid=q.qid, answer=answer, usage=resp.usage)
+        usage = sum_token_usage(refine_usage, resp.usage)
+        record = AnswerRecord(qid=q.qid, answer=answer, usage=usage)
         return record, evidence
+
+    def _build_retrieval_plan(self, q: Question) -> RetrievalPlan:
+        """构造全局 query 与分选项 query。"""
+        global_query = self._build_query(q)
+        global_features = extract_query_features(global_query)
+        option_queries: dict[str, str] = {}
+        for key in sorted(q.options.keys()):
+            option_text = q.options[key]
+            option_query = "\n".join(
+                [
+                    q.question.strip(),
+                    f"选项 {key}: {option_text.strip()}",
+                    expand_query_by_domain(domain=q.domain, text=option_text),
+                ]
+            ).strip()
+            option_queries[key] = option_query
+        return RetrievalPlan(global_query=global_query, option_queries=option_queries, features=global_features)
 
     def _build_query(self, q: Question) -> str:
         """构造检索 query。"""
         parts = [q.question.strip(), "选项："]
-        for k in sorted(q.options.keys()):
-            parts.append(f"{k}. {q.options[k].strip()}")
+        for key in sorted(q.options.keys()):
+            parts.append(f"{key}. {q.options[key].strip()}")
+        parts.append(expand_query_by_domain(domain=q.domain, text=q.question))
         return "\n".join(parts).strip()
 
+    def _select_candidate_docs(self, q: Question, plan: RetrievalPlan) -> list[str]:
+        """先做文档级粗筛，再返回候选文档。"""
+        if q.doc_ids:
+            return q.doc_ids
+
+        all_doc_ids = self._docs.list_doc_ids(q.domain)
+        if not all_doc_ids:
+            logger.warning("领域下没有可选文档：domain=%s qid=%s", q.domain, q.qid)
+            return []
+
+        profiles: list[str] = []
+        valid_doc_ids: list[str] = []
+        for doc_id in all_doc_ids:
+            try:
+                profiles.append(
+                    self._docs.load_doc_profile(
+                        domain=q.domain,
+                        doc_id=doc_id,
+                        window_chars=self._retrieval.coarse_doc_window_chars,
+                    )
+                )
+                valid_doc_ids.append(doc_id)
+            except Exception as exc:
+                logger.warning("文档 profile 构建失败：%s/%s %s", q.domain, doc_id, repr(exc))
+
+        if not profiles:
+            return []
+
+        rankings = bm25_rank(query=plan.global_query, chunks=profiles)
+        scored_doc_ids: list[tuple[str, float]] = []
+        for index, score in rankings:
+            doc_id = valid_doc_ids[index]
+            profile_text = profiles[index]
+            boosted = score + compute_symbolic_boost(
+                text=profile_text,
+                title=doc_id,
+                features=plan.features,
+                domain=q.domain,
+            )
+            scored_doc_ids.append((doc_id, boosted))
+        scored_doc_ids.sort(key=lambda item: item[1], reverse=True)
+        return [doc_id for doc_id, _ in scored_doc_ids[: self._retrieval.doc_top_k]]
+
+    def _retrieve_evidence(
+        self,
+        q: Question,
+        doc_ids: list[str],
+        plan: RetrievalPlan,
+    ) -> list[EvidenceSnippet]:
+        """执行两阶段检索，返回按 score 排序的证据片段。"""
+        merged: dict[str, EvidenceSnippet] = {}
+        relaxed_queries = build_relaxed_queries(q=q, plan=plan)
+
+        for round_index in range(self._retrieval.max_routing_rounds):
+            option_queries = plan.option_queries if round_index == 0 else relaxed_queries
+            current_hits = self._retrieve_round(q=q, doc_ids=doc_ids, option_queries=option_queries)
+            for hit in current_hits:
+                existing = merged.get(hit.chunk_id)
+                if existing is None or hit.score > existing.score:
+                    merged[hit.chunk_id] = hit
+            if merged:
+                break
+
+        if not merged:
+            fallback = self._build_fallback_evidence(q=q, doc_ids=doc_ids)
+            for hit in fallback:
+                merged[hit.chunk_id] = hit
+
+        evidence = sorted(merged.values(), key=lambda item: item.score, reverse=True)
+        return evidence[: self._retrieval.top_k_chunks]
+
+    def _retrieve_round(
+        self,
+        q: Question,
+        doc_ids: list[str],
+        option_queries: dict[str, str],
+    ) -> list[EvidenceSnippet]:
+        """执行一轮选项级段落召回。"""
+        results: list[EvidenceSnippet] = []
+        for option_key, option_query in option_queries.items():
+            option_features = extract_query_features(option_query)
+            for doc_id in doc_ids:
+                try:
+                    chunks = self._docs.load_chunks(
+                        domain=q.domain,
+                        doc_id=doc_id,
+                        max_chars=adjust_chunk_size(domain=q.domain, base_size=self._retrieval.chunk_max_chars),
+                    )
+                except Exception as exc:
+                    logger.warning("chunk 加载失败：%s/%s %s", q.domain, doc_id, repr(exc))
+                    continue
+
+                ranking_texts = [chunk.to_index_text() for chunk in chunks]
+                rankings = bm25_rank(query=option_query, chunks=ranking_texts)
+                per_doc_hits = 0
+                for index, base_score in rankings:
+                    chunk = chunks[index]
+                    boosted = base_score + compute_symbolic_boost(
+                        text=chunk.content,
+                        title=chunk.title,
+                        features=option_features,
+                        domain=q.domain,
+                    )
+                    boosted += compute_domain_specific_boost(
+                        domain=q.domain,
+                        option_text=q.options[option_key],
+                        doc_id=chunk.doc_id,
+                        title=chunk.title,
+                        text=chunk.content,
+                        features=option_features,
+                    )
+                    focused_content = focus_chunk_content(
+                        domain=q.domain,
+                        option_text=q.options[option_key],
+                        text=chunk.content,
+                    )
+                    results.append(
+                        EvidenceSnippet(
+                            doc_id=chunk.doc_id,
+                            title=chunk.title,
+                            content=focused_content,
+                            score=float(boosted),
+                            chunk_id=chunk.chunk_id,
+                            option_key=option_key,
+                        )
+                    )
+                    per_doc_hits += 1
+                    if per_doc_hits >= self._retrieval.per_doc_top_k:
+                        break
+
+        results.sort(key=lambda item: item.score, reverse=True)
+        limited: list[EvidenceSnippet] = []
+        per_option_counter: dict[str, int] = {}
+        for item in results:
+            option_key = item.option_key or "_"
+            used = per_option_counter.get(option_key, 0)
+            if used >= self._retrieval.per_option_top_k:
+                continue
+            per_option_counter[option_key] = used + 1
+            limited.append(item)
+        return limited
+
+    def _build_fallback_evidence(self, q: Question, doc_ids: list[str]) -> list[EvidenceSnippet]:
+        """在检索失败时使用目录与首个 chunk 兜底。"""
+        fallback: list[EvidenceSnippet] = []
+        for doc_id in doc_ids[: self._retrieval.doc_top_k]:
+            outline = self._docs.build_outline(domain=q.domain, doc_id=doc_id, max_items=6)
+            if outline:
+                fallback.append(
+                    EvidenceSnippet(
+                        doc_id=doc_id,
+                        title="文档大纲",
+                        content=outline,
+                        score=0.1,
+                        chunk_id=f"{doc_id}::outline",
+                        option_key=None,
+                    )
+                )
+            try:
+                chunks = self._docs.load_chunks(
+                    domain=q.domain,
+                    doc_id=doc_id,
+                    max_chars=adjust_chunk_size(domain=q.domain, base_size=self._retrieval.chunk_max_chars),
+                )
+            except Exception:
+                continue
+            if chunks:
+                chunk = chunks[0]
+                fallback.append(
+                    EvidenceSnippet(
+                        doc_id=chunk.doc_id,
+                        title=chunk.title,
+                        content=chunk.content,
+                        score=0.05,
+                        chunk_id=chunk.chunk_id,
+                        option_key=None,
+                    )
+                )
+        return fallback
+
+    def _build_context(
+        self,
+        q: Question,
+        plan: RetrievalPlan,
+        doc_ids: list[str],
+        evidence: list[EvidenceSnippet],
+    ) -> tuple[str, TokenUsage]:
+        """按选项拼装证据链，并在必要时调用 Qwen 做精筛压缩。"""
+        context = build_grouped_context(
+            q=q,
+            doc_ids=doc_ids,
+            evidence=evidence,
+            docs=self._docs,
+        )
+        supplement = build_domain_supplement(q=q, doc_ids=doc_ids, docs=self._docs, evidence=evidence)
+        if supplement is not None and supplement.content:
+            context = f"{context}\n\n## {supplement.title}\n{supplement.content}".strip()
+        if len(context) <= self._retrieval.max_context_chars:
+            return context, zero_token_usage()
+
+        if len(context) > self._retrieval.refine_context_chars:
+            refined, usage = self._refine_context_with_llm(q=q, plan=plan, context=context)
+            if refined:
+                refined = trim_grouped_context(
+                    query=plan.global_query,
+                    text=refined,
+                    max_chars=self._retrieval.max_context_chars,
+                )
+                return refined, usage
+
+        compressed = trim_grouped_context(
+            query=plan.global_query,
+            text=context,
+            max_chars=self._retrieval.max_context_chars,
+        )
+        return compressed, zero_token_usage()
+
+    def _refine_context_with_llm(
+        self,
+        q: Question,
+        plan: RetrievalPlan,
+        context: str,
+    ) -> tuple[str, TokenUsage]:
+        """使用 Qwen 做证据精筛与上下文压缩。"""
+        options_text = "\n".join(f"{key}. {value}" for key, value in sorted(q.options.items()))
+        messages = [
+            ChatMessage(
+                role="system",
+                content=(
+                    "你是金融证据压缩器。"
+                    "只保留能够直接支撑或反驳选项的证据。"
+                    "不允许引入外部知识。"
+                    "若某条证据无关，直接丢弃。"
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"领域：{q.domain}\n"
+                    f"题目：{q.question}\n"
+                    f"选项：\n{options_text}\n\n"
+                    f"请按 A/B/C/D 分组输出最关键证据，每条证据保留 DocID 与 Title。\n"
+                    f"如果某个选项没有直接证据，请输出 None。\n\n"
+                    f"候选证据：\n{context}\n\n"
+                    f"补充提示：{DOMAIN_PROMPT_HINTS.get(q.domain, '')}"
+                ),
+            ),
+        ]
+        try:
+            response = self._llm.chat(messages)
+            return response.content.strip(), response.usage
+        except Exception as exc:
+            logger.warning("上下文精筛失败：qid=%s error=%s", q.qid, repr(exc))
+            return "", zero_token_usage()
+
     def _build_messages(self, q: Question, context: str) -> list[ChatMessage]:
-        """构造 Chat messages。"""
+        """构造最终推理 messages。"""
         system = (
-            "你是金融长文档问答助手。"
-            "你必须严格基于提供的证据片段作答。"
-            "不要输出解释、不要输出除答案字母以外的内容。"
+            "你是一名严谨的金融审计师。"
+            "你必须严格基于证据作答，不得使用常识或外部知识。"
+            "如果上下文提供的证据不足以推导某选项，则该选项视为错误。"
+            "请逐项审阅 A/B/C/D，但最终只能输出 JSON。"
         )
         user = self._format_user_prompt(q=q, context=context)
         return [ChatMessage(role="system", content=system), ChatMessage(role="user", content=user)]
 
     def _format_user_prompt(self, q: Question, context: str) -> str:
-        """构造用户 prompt。"""
-        fmt = q.answer_format
+        """构造最终推理 prompt。"""
+        options_text = "\n".join(f"{key}. {value}" for key, value in sorted(q.options.items()))
         format_hint = {
-            AnswerFormat.MCQ: "单选题：只输出一个大写字母（A/B/C/D）。",
-            AnswerFormat.TF: "判断题：只输出一个大写字母（A 或 B）。",
-            AnswerFormat.MULTI: "多选题：输出多个大写字母，按字母顺序排列，不使用分隔符（例如 ABC）。",
-        }[fmt]
-
-        options_text = "\n".join(f"{k}. {v}" for k, v in sorted(q.options.items()))
+            AnswerFormat.MCQ: "最终答案必须是一个大写字母。",
+            AnswerFormat.TF: "最终答案必须是一个大写字母（A 或 B）。",
+            AnswerFormat.MULTI: "最终答案必须是按字母排序且去重后的多个大写字母。",
+        }[q.answer_format]
+        domain_instruction = build_domain_reasoning_instruction(q.domain)
         return (
-            f"{format_hint}\n\n"
-            f"题目：{q.question}\n\n"
+            f"领域：{q.domain}\n"
+            f"题目：{q.question}\n"
             f"选项：\n{options_text}\n\n"
-            f"证据片段：\n{context}\n\n"
-            "请给出最终答案："
+            f"证据链：\n{context}\n\n"
+            f"领域提示：{DOMAIN_PROMPT_HINTS.get(q.domain, '')}\n"
+            f"领域专项要求：{domain_instruction}\n"
+            f"{format_hint}\n"
+            "请输出如下 JSON：\n"
+            '{\n'
+            '  "option_evaluation": {\n'
+            '    "A": {"verdict": true, "evidence": "DocID + Title", "reason": "一句话"},\n'
+            '    "B": {"verdict": false, "evidence": "...", "reason": "一句话"}\n'
+            "  },\n"
+            '  "final_answer": "AC"\n'
+            "}\n"
+            "不要输出 JSON 以外的内容。"
         )
 
     def _normalize_answer(self, fmt: AnswerFormat, text: str) -> str:
         """从模型输出中抽取并规范化答案。"""
-        cleaned = (text or "").strip().upper()
-        letters = re.findall(r"[A-D]", cleaned)
+        payload = extract_json_payload(text)
+        if payload:
+            final_answer = payload.get("final_answer")
+            if isinstance(final_answer, str) and final_answer.strip():
+                return normalize_answer_letters(fmt=fmt, text=final_answer)
 
-        if fmt in {AnswerFormat.MCQ, AnswerFormat.TF}:
-            return letters[0] if letters else "A"
+            option_evaluation = payload.get("option_evaluation")
+            if isinstance(option_evaluation, dict):
+                letters = []
+                for key in sorted(option_evaluation.keys()):
+                    item = option_evaluation.get(key)
+                    if isinstance(item, dict) and bool(item.get("verdict")):
+                        letters.append(key)
+                if letters:
+                    return normalize_answer_letters(fmt=fmt, text="".join(letters))
 
-        if fmt == AnswerFormat.MULTI:
-            unique = sorted(set(letters))
-            return "".join(unique) if unique else "A"
+        return normalize_answer_letters(fmt=fmt, text=text)
 
-        return "A"
 
-    def _retrieve_evidence(self, domain: str, doc_ids: list[str], query: str) -> list[EvidenceSnippet]:
-        """对候选文档做无向量检索，返回 top-k 证据片段。"""
-        top_k = self._retrieval.top_k_chunks
-        per_doc_top_k = max(1, self._retrieval.per_doc_top_k)
-
-        all_hits: list[EvidenceSnippet] = []
-        for doc_id in doc_ids:
-            try:
-                text = self._docs.load_text(domain=domain, doc_id=doc_id)
-            except Exception as exc:
-                logger.warning("文档读取失败：%s/%s: %s", domain, doc_id, repr(exc))
-                continue
-
-            chunks = chunk_text(text, max_chars=self._retrieval.chunk_max_chars)
-            scores = bm25_rank(query=query, chunks=chunks)
-            for idx, score in scores[:per_doc_top_k]:
-                all_hits.append(
-                    EvidenceSnippet(
-                        doc_id=doc_id,
-                        content=chunks[idx].strip(),
-                        score=float(score),
-                        chunk_id=f"{doc_id}::chunk{idx}",
-                    )
+def extract_query_features(text: str) -> QueryFeatures:
+    """抽取时间、数值、法条与关键词特征。"""
+    normalized = normalize_text(text)
+    years = tuple(sorted(set(re.findall(r"(?:19|20)\d{2}年?|(?:19|20)\d{2}", normalized))))
+    numbers = tuple(
+        sorted(
+            set(
+                re.findall(
+                    r"\d+(?:\.\d+)?(?:%|％|亿元|万元|万|亿|元|股|倍|个工作日|工作日|日|天|个月|月|年)?",
+                    normalized,
                 )
-
-        all_hits.sort(key=lambda x: x.score, reverse=True)
-        return all_hits[:top_k]
-
-    def _build_context(self, query: str, evidence: list[EvidenceSnippet]) -> str:
-        """拼接证据并做长度压缩。"""
-        parts: list[str] = []
-        for e in evidence:
-            parts.append(f"[{e.doc_id}] {e.content}")
-        combined = "\n\n".join(parts).strip()
-
-        if len(combined) <= self._retrieval.max_context_chars:
-            return combined
-
-        return compress_text_by_overlap(
-            query=query,
-            text=combined,
-            max_chars=self._retrieval.max_context_chars,
+            )
         )
+    )
+    clauses = tuple(sorted(set(re.findall(r"第[一二三四五六七八九十百千万0-9]+[条章节款]", normalized))))
+    keywords = tuple(sorted(set(extract_keywords(normalized))))
+    return QueryFeatures(years=years, numbers=numbers, clauses=clauses, keywords=keywords)
 
 
-def chunk_text(text: str, max_chars: int) -> list[str]:
-    """将长文本切分为 chunks。"""
-    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-    paras = [p.strip() for p in re.split(r"\n\s*\n", normalized) if p.strip()]
-    if not paras:
-        return [normalized.strip()]
+def extract_keywords(text: str) -> list[str]:
+    """提取较有区分度的中文/英文关键词。"""
+    stopwords = {
+        "根据",
+        "关于",
+        "下列",
+        "哪些",
+        "是否",
+        "可以",
+        "相关",
+        "公司",
+        "规定",
+        "以下",
+        "正确",
+        "错误",
+        "准确",
+        "结合",
+        "判断",
+    }
+    keywords: list[str] = []
+    for part in re.findall(r"[\u4e00-\u9fff]{2,10}|[a-z0-9_]{3,}", text.lower()):
+        if part in stopwords:
+            continue
+        keywords.append(part)
+    return keywords
 
-    chunks: list[str] = []
-    buf: list[str] = []
-    buf_len = 0
-    for p in paras:
-        add_len = len(p) + (2 if buf else 0)
-        if buf and buf_len + add_len > max_chars:
-            chunks.append("\n\n".join(buf).strip())
-            buf = [p]
-            buf_len = len(p)
-        else:
-            buf.append(p)
-            buf_len += add_len
-    if buf:
-        chunks.append("\n\n".join(buf).strip())
-    return chunks
+
+def expand_query_by_domain(domain: str, text: str) -> str:
+    """使用领域词表扩展 query。"""
+    expansions: list[str] = []
+    synonyms = DOMAIN_SYNONYMS.get(domain, {})
+    for key, terms in synonyms.items():
+        if key in text:
+            expansions.extend(terms)
+    return " ".join(sorted(set(expansions)))
+
+
+def build_relaxed_queries(q: Question, plan: RetrievalPlan) -> dict[str, str]:
+    """构建第二轮放宽的 option queries。"""
+    relaxed: dict[str, str] = {}
+    feature_terms = list(plan.features.years) + list(plan.features.numbers) + list(plan.features.clauses)
+    feature_terms.extend(plan.features.keywords[:12])
+    feature_text = " ".join(feature_terms)
+    for key in sorted(q.options.keys()):
+        relaxed[key] = f"{q.options[key]} {feature_text} {expand_query_by_domain(q.domain, q.options[key])}".strip()
+    return relaxed
+
+
+def adjust_chunk_size(domain: str, base_size: int) -> int:
+    """按领域调整 chunk 大小。"""
+    if domain == "research":
+        return int(base_size * 1.5)
+    if domain == "regulatory":
+        return max(1200, int(base_size * 0.9))
+    return base_size
+
+
+def build_domain_reasoning_instruction(domain: str) -> str:
+    """为推理阶段生成更强的领域化要求。"""
+    if domain == "financial_reports":
+        return "先按年份列出关键指标，再核对本期、上年同期、同比、现金分红和研发投入口径，不一致时以证据不足处理。"
+    if domain == "insurance":
+        return "先提取公式、触发条件与代入值；若涉及身故保险金、退保金额、免赔额或赔付金额，先计算再判断选项。"
+    return "先定位直接证据，再逐项判断，不要跳步。"
+
+
+def build_grouped_context(
+    q: Question,
+    doc_ids: list[str],
+    evidence: list[EvidenceSnippet],
+    docs: DocumentRepository,
+) -> str:
+    """将证据按选项聚合为法庭证据链。"""
+    sections: list[str] = []
+    for option_key in sorted(q.options.keys()):
+        sections.append(f"## 选项 {option_key}")
+        sections.append(f"候选陈述：{q.options[option_key]}")
+        option_hits = [item for item in evidence if item.option_key == option_key]
+        if not option_hits:
+            sections.append("None")
+            sections.append("")
+            continue
+        for item in option_hits:
+            sections.append(
+                f"- [DocID: {item.doc_id} | Title: {item.title} | Score: {item.score:.3f}] {item.content}"
+            )
+        sections.append("")
+
+    if evidence:
+        sections.append("## 汇总证据")
+        for item in evidence:
+            sections.append(f"- [{item.doc_id} | {item.title}] {item.content}")
+    else:
+        sections.append("## 汇总证据")
+        for doc_id in doc_ids:
+            outline = docs.build_outline(domain=q.domain, doc_id=doc_id, max_items=6)
+            if outline:
+                sections.append(f"- [{doc_id}] {outline}")
+    return "\n".join(sections).strip()
+
+
+def normalize_text(text: str) -> str:
+    """规范化文本空白。"""
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
 def tokenize(text: str) -> list[str]:
     """对中英混合文本做轻量 tokenization（非 embedding）。"""
-    text = (text or "").lower()
+    normalized = normalize_text(text).lower()
     tokens: list[str] = []
-    for part in re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", text):
+    for part in re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", normalized):
         if re.fullmatch(r"[\u4e00-\u9fff]+", part):
             tokens.extend(list(part))
         else:
@@ -203,49 +607,176 @@ def tokenize(text: str) -> list[str]:
 
 
 def bm25_rank(query: str, chunks: list[str]) -> list[tuple[int, float]]:
-    """对 chunks 使用 BM25 打分并排序。"""
+    """对文本列表使用 BM25 打分并排序。"""
     q_terms = tokenize(query)
     if not q_terms:
-        return [(i, 0.0) for i in range(len(chunks))]
+        return [(index, 0.0) for index in range(len(chunks))]
 
-    docs_terms = [tokenize(c) for c in chunks]
-    doc_lens = [len(t) for t in docs_terms]
+    docs_terms = [tokenize(item) for item in chunks]
+    doc_lens = [len(terms) for terms in docs_terms]
     avgdl = (sum(doc_lens) / len(doc_lens)) if doc_lens else 0.0
 
     df: dict[str, int] = {}
     for terms in docs_terms:
-        for t in set(terms):
-            df[t] = df.get(t, 0) + 1
+        for token in set(terms):
+            df[token] = df.get(token, 0) + 1
 
     n = len(chunks)
     k1 = 1.5
     b = 0.75
 
-    def idf(t: str) -> float:
-        dft = df.get(t, 0)
+    def idf(token: str) -> float:
+        dft = df.get(token, 0)
         return math.log(1 + (n - dft + 0.5) / (dft + 0.5))
 
-    scores: list[tuple[int, float]] = []
     q_tf: dict[str, int] = {}
-    for t in q_terms:
-        q_tf[t] = q_tf.get(t, 0) + 1
+    for token in q_terms:
+        q_tf[token] = q_tf.get(token, 0) + 1
 
-    for i, terms in enumerate(docs_terms):
+    scores: list[tuple[int, float]] = []
+    for index, terms in enumerate(docs_terms):
         tf: dict[str, int] = {}
-        for t in terms:
-            tf[t] = tf.get(t, 0) + 1
-        dl = doc_lens[i] or 1
-        denom_base = k1 * (1 - b + b * (dl / (avgdl or 1.0)))
+        for token in terms:
+            tf[token] = tf.get(token, 0) + 1
+        doc_len = doc_lens[index] or 1
+        denom_base = k1 * (1 - b + b * (doc_len / (avgdl or 1.0)))
         score = 0.0
-        for t in q_tf.keys():
-            f = tf.get(t, 0)
-            if f <= 0:
+        for token in q_tf:
+            frequency = tf.get(token, 0)
+            if frequency <= 0:
                 continue
-            score += idf(t) * (f * (k1 + 1)) / (f + denom_base)
-        scores.append((i, score))
+            score += idf(token) * (frequency * (k1 + 1)) / (frequency + denom_base)
+        scores.append((index, score))
 
-    scores.sort(key=lambda x: x[1], reverse=True)
+    scores.sort(key=lambda item: item[1], reverse=True)
     return scores
+
+
+def compute_symbolic_boost(text: str, title: str, features: QueryFeatures, domain: str) -> float:
+    """对数值、法条、标题与领域关键字命中做额外加权。"""
+    normalized_text = normalize_text(text)
+    normalized_title = normalize_text(title)
+    score = 0.0
+
+    for year in features.years:
+        if year and year in normalized_text:
+            score += 0.4
+    for number in features.numbers:
+        if number and number in normalized_text:
+            score += 0.25
+    for clause in features.clauses:
+        if clause and (clause in normalized_text or clause in normalized_title):
+            score += 0.8
+    for keyword in features.keywords[:12]:
+        if keyword and (keyword in normalized_title or keyword in normalized_text):
+            score += 0.1
+    for synonyms in DOMAIN_SYNONYMS.get(domain, {}).values():
+        for term in synonyms:
+            if term in normalized_text:
+                score += 0.05
+    return score
+
+
+def compute_domain_specific_boost(
+    domain: str,
+    option_text: str,
+    doc_id: str,
+    title: str,
+    text: str,
+    features: QueryFeatures,
+) -> float:
+    """对高价值领域施加更细的排序加权。"""
+    normalized_text = normalize_text(text)
+    normalized_title = normalize_text(title)
+    normalized_option = normalize_text(option_text)
+    score = 0.0
+
+    if domain == "financial_reports":
+        doc_years = extract_years_from_text(f"{doc_id} {title}")
+        option_years = set(extract_years_from_text(normalized_option)) | set(extract_years_from_text(" ".join(features.years)))
+        if doc_years and option_years and doc_years & option_years:
+            score += 0.6
+        report_terms = (
+            "营业收入",
+            "营业总收入",
+            "净利润",
+            "归属于上市公司股东的净利润",
+            "经营活动产生的现金流量净额",
+            "研发投入",
+            "研发费用",
+            "现金分红",
+            "分红",
+            "上年同期",
+            "本期",
+            "同比",
+        )
+        score += 0.15 * count_term_hits(normalized_text, report_terms)
+        if any(term in normalized_option for term in ("增长", "下降", "优于", "减少", "提升")) and any(
+            term in normalized_text for term in ("同比", "较上年", "增减", "上年同期")
+        ):
+            score += 0.5
+
+    if domain == "insurance":
+        insurance_terms = (
+            "身故保险金",
+            "退保",
+            "现金价值",
+            "保单账户价值",
+            "个人账户价值",
+            "基本保险金额",
+            "已交保费",
+            "免赔额",
+            "给付",
+            "赔付",
+            "年金",
+            "较大者",
+            "max",
+            "乘以",
+        )
+        score += 0.18 * count_term_hits(normalized_text, insurance_terms)
+        if any(symbol in text for symbol in ("max", "MAX", "*", "×", "÷", "+", "-")):
+            score += 0.45
+        if re.search(r"\d+(?:\.\d+)?(?:万元|万|亿元|亿|元)", normalized_text):
+            score += 0.25
+        if any(term in normalized_option for term in ("排序", "计算", "赔付", "退保", "身故")) and any(
+            term in normalized_text for term in ("较大者", "已交保费", "现金价值", "账户价值", "免赔额")
+        ):
+            score += 0.55
+
+    return score
+
+
+def focus_chunk_content(domain: str, option_text: str, text: str) -> str:
+    """针对高价值领域抽取更聚焦的证据内容。"""
+    if domain == "financial_reports":
+        focused = extract_financial_report_focus(option_text=option_text, text=text)
+        return focused or text
+    if domain == "insurance":
+        focused = extract_insurance_focus(option_text=option_text, text=text)
+        return focused or text
+    return text
+
+
+def extract_years_from_text(text: str) -> list[str]:
+    """从文本中抽取年份。"""
+    return re.findall(r"(?:19|20)\d{2}", text or "")
+
+
+def count_term_hits(text: str, terms: tuple[str, ...] | list[str]) -> int:
+    """统计术语命中数。"""
+    return sum(1 for term in terms if term in text)
+
+
+def trim_grouped_context(query: str, text: str, max_chars: int) -> str:
+    """保留结构标题并对内容做抽取式压缩。"""
+    lines = text.splitlines()
+    headings = [line for line in lines if line.startswith("## ")]
+    compressed_body = compress_text_by_overlap(query=query, text=text, max_chars=max_chars)
+    prefix = "\n".join(headings[:8]).strip()
+    if prefix:
+        candidate = f"{prefix}\n{compressed_body}".strip()
+        return candidate[:max_chars]
+    return compressed_body[:max_chars]
 
 
 def compress_text_by_overlap(query: str, text: str, max_chars: int) -> str:
@@ -256,27 +787,155 @@ def compress_text_by_overlap(query: str, text: str, max_chars: int) -> str:
 
     sentences = re.split(r"(?<=[。！？!?\n])\s*", text)
     scored: list[tuple[float, str]] = []
-    for s in sentences:
-        s = s.strip()
-        if not s:
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
             continue
-        t = tokenize(s)
-        if not t:
+        tokens = tokenize(sentence)
+        if not tokens:
             continue
-        overlap = sum(1 for x in t if x in q_terms)
-        scored.append((float(overlap) / (len(t) or 1), s))
+        overlap = sum(1 for token in tokens if token in q_terms)
+        scored.append((float(overlap) / (len(tokens) or 1), sentence))
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    buf: list[str] = []
+    scored.sort(key=lambda item: item[0], reverse=True)
+    buffer: list[str] = []
     total = 0
-    for _, s in scored:
-        if total + len(s) + 1 > max_chars:
+    for _, sentence in scored:
+        if total + len(sentence) + 1 > max_chars:
             continue
-        buf.append(s)
-        total += len(s) + 1
+        buffer.append(sentence)
+        total += len(sentence) + 1
         if total >= max_chars:
             break
-    return "\n".join(buf).strip() or (text or "")[:max_chars]
+    return "\n".join(buffer).strip() or (text or "")[:max_chars]
+
+
+def extract_financial_report_focus(option_text: str, text: str) -> str:
+    """抽取财报题更聚焦的指标证据。"""
+    terms = [
+        "营业收入",
+        "营业总收入",
+        "净利润",
+        "归属于上市公司股东的净利润",
+        "经营活动产生的现金流量净额",
+        "研发投入",
+        "研发费用",
+        "现金分红",
+        "上年同期",
+        "本期",
+        "同比",
+        "增长",
+        "下降",
+    ]
+    if "分红" in option_text:
+        terms.extend(["利润分配", "现金股利", "每10股"])
+    if "研发" in option_text:
+        terms.extend(["研发投入占营业收入比例", "研发人员"])
+    if "现金流" in option_text:
+        terms.extend(["现金流量", "经营活动"])
+
+    return extract_focus_sentences(text=text, terms=terms, max_sentences=6, max_chars=900)
+
+
+def extract_insurance_focus(option_text: str, text: str) -> str:
+    """抽取保险题更聚焦的公式/金额证据。"""
+    terms = [
+        "身故保险金",
+        "退保",
+        "现金价值",
+        "保单账户价值",
+        "个人账户价值",
+        "已交保费",
+        "基本保险金额",
+        "免赔额",
+        "赔付",
+        "给付",
+        "年金",
+        "账户价值",
+        "较大者",
+        "乘以",
+        "max",
+    ]
+    if "白血病" in option_text:
+        terms.extend(["白血病", "医保", "复发", "住院", "保险责任"])
+    if "退保" in option_text:
+        terms.extend(["解除保险合同", "退保费用"])
+    return extract_focus_sentences(text=text, terms=terms, max_sentences=6, max_chars=900)
+
+
+def extract_focus_sentences(text: str, terms: list[str], max_sentences: int, max_chars: int) -> str:
+    """从文本中抽取命中术语较多的句子。"""
+    sentences = re.split(r"(?<=[。；;！？!?\n])\s*", text)
+    scored: list[tuple[int, str]] = []
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        hits = count_term_hits(sentence, terms)
+        if hits <= 0 and not re.search(r"\d+(?:\.\d+)?(?:万元|万|亿元|亿|元|%|％)", sentence):
+            continue
+        if re.search(r"(max|MAX|较大者|乘以|免赔额|上年同期|同比|本期)", sentence):
+            hits += 2
+        scored.append((hits, sentence))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected: list[str] = []
+    total = 0
+    for _, sentence in scored:
+        if len(selected) >= max_sentences:
+            break
+        if total + len(sentence) + 1 > max_chars:
+            continue
+        selected.append(sentence)
+        total += len(sentence) + 1
+    return "\n".join(selected).strip()
+
+
+def extract_json_payload(text: str) -> dict | None:
+    """从模型输出中提取 JSON 对象。"""
+    content = (text or "").strip()
+    if not content:
+        return None
+    try:
+        payload = json.loads(content)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        pass
+
+    match = re.search(r"\{[\s\S]*\}", content)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(0))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def normalize_answer_letters(fmt: AnswerFormat, text: str) -> str:
+    """规范化答案字母。"""
+    letters = re.findall(r"[A-D]", (text or "").upper())
+    if fmt in {AnswerFormat.MCQ, AnswerFormat.TF}:
+        return letters[0] if letters else "A"
+    unique = sorted(set(letters))
+    return "".join(unique) if unique else "A"
+
+
+def zero_token_usage() -> TokenUsage:
+    """返回零 token usage。"""
+    return TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+
+
+def sum_token_usage(*items: TokenUsage) -> TokenUsage:
+    """汇总多个 token usage。"""
+    prompt_tokens = sum(item.prompt_tokens for item in items)
+    completion_tokens = sum(item.completion_tokens for item in items)
+    total_tokens = sum(item.total_tokens for item in items)
+    return TokenUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 def write_answer_csv(path: Path, records: list[AnswerRecord]) -> None:
@@ -305,8 +964,10 @@ def write_evidence_jsonl(path: Path, q: Question, evidence: list[EvidenceSnippet
         "evidence_retrieval": [
             {
                 "doc_id": e.doc_id,
+                "title": e.title,
                 "chunk_id": e.chunk_id,
                 "score": e.score,
+                "option_key": e.option_key,
                 "quoted_clause": e.content,
             }
             for e in evidence

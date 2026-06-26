@@ -6,9 +6,17 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from fin_agent.domain.models import AnswerFormat, Question
+from fin_agent.domain.models import Question
 
 logger = logging.getLogger(__name__)
+
+HEADING_PATTERNS = (
+    r"^第[一二三四五六七八九十百千万0-9]+[编章节条款]\s*.*$",
+    r"^[一二三四五六七八九十]+[、.]\s*.*$",
+    r"^[(（]?[一二三四五六七八九十0-9]+[)）][、.]?\s*.*$",
+    r"^[A-D][、.]\s*.*$",
+    r"^\d+(\.\d+){0,3}\s+.*$",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +26,21 @@ class DocumentRef:
     domain: str
     doc_id: str
     path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredChunk:
+    """结构化分块结果。"""
+
+    doc_id: str
+    title: str
+    content: str
+    chunk_id: str
+    order: int
+
+    def to_index_text(self) -> str:
+        """返回适合索引与检索的文本。"""
+        return f"[DocID: {self.doc_id} | Title: {self.title}] {self.content}".strip()
 
 
 class QuestionRepository:
@@ -61,12 +84,13 @@ class QuestionRepository:
 
 
 class DocumentRepository:
-    """从 raw 目录按 doc_id 加载文档文本。"""
+    """从 raw 目录按 doc_id 加载文档文本与结构化 chunks。"""
 
     def __init__(self, raw_root: Path) -> None:
         """初始化仓库。"""
         self._raw_root = raw_root
-        self._cache: dict[tuple[str, str], str] = {}
+        self._text_cache: dict[tuple[str, str], str] = {}
+        self._chunk_cache: dict[tuple[str, str, int], list[StructuredChunk]] = {}
 
     def resolve(self, domain: str, doc_id: str) -> DocumentRef:
         """定位 doc_id 对应的文件路径。"""
@@ -88,14 +112,56 @@ class DocumentRepository:
     def load_text(self, domain: str, doc_id: str) -> str:
         """读取并返回文本内容（带缓存）。"""
         cache_key = (domain, doc_id)
-        cached = self._cache.get(cache_key)
+        cached = self._text_cache.get(cache_key)
         if cached is not None:
             return cached
 
         ref = self.resolve(domain=domain, doc_id=doc_id)
         text = self._read_document(ref.path)
-        self._cache[cache_key] = text
+        self._text_cache[cache_key] = text
         return text
+
+    def load_chunks(self, domain: str, doc_id: str, max_chars: int) -> list[StructuredChunk]:
+        """读取并返回结构化 chunks（带缓存）。"""
+        cache_key = (domain, doc_id, max_chars)
+        cached = self._chunk_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        text = self.load_text(domain=domain, doc_id=doc_id)
+        chunks = self._build_structured_chunks(doc_id=doc_id, text=text, max_chars=max_chars)
+        self._chunk_cache[cache_key] = chunks
+        return chunks
+
+    def load_doc_profile(self, domain: str, doc_id: str, window_chars: int) -> str:
+        """加载用于文档级粗筛的 profile 文本。"""
+        text = self.load_text(domain=domain, doc_id=doc_id)
+        title = self.infer_doc_title(domain=domain, doc_id=doc_id, text=text)
+        outline = self.build_outline(domain=domain, doc_id=doc_id, max_items=6)
+        body_head = re.sub(r"\s+", " ", text[:window_chars]).strip()
+        return f"{doc_id}\n{title}\n{outline}\n{body_head}".strip()
+
+    def infer_doc_title(self, domain: str, doc_id: str, text: str | None = None) -> str:
+        """推断文档标题。"""
+        if text is None:
+            text = self.load_text(domain=domain, doc_id=doc_id)
+        for line in text.splitlines():
+            stripped = line.strip()
+            if 4 <= len(stripped) <= 120:
+                return stripped
+        return doc_id
+
+    def build_outline(self, domain: str, doc_id: str, max_items: int = 8) -> str:
+        """提取文档核心大纲，供回退路由使用。"""
+        text = self.load_text(domain=domain, doc_id=doc_id)
+        headings: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped and is_heading(stripped):
+                headings.append(stripped)
+            if len(headings) >= max_items:
+                break
+        return "\n".join(headings)
 
     def list_doc_ids(self, domain: str) -> list[str]:
         """列出某领域下可用的 doc_id（用于 B 组未知 doc_ids 的回退策略）。"""
@@ -109,11 +175,88 @@ class DocumentRepository:
                 doc_ids.add(p.stem)
             return sorted(doc_ids)
 
-        for p in domain_dir.glob("*.pdf"):
-            doc_ids.add(p.stem)
-        for p in domain_dir.glob("*.PDF"):
-            doc_ids.add(p.stem)
+        for pattern in ("*.pdf", "*.PDF", "*.txt", "*.TXT"):
+            for p in domain_dir.glob(pattern):
+                doc_ids.add(p.stem)
         return sorted(doc_ids)
+
+    def _build_structured_chunks(self, doc_id: str, text: str, max_chars: int) -> list[StructuredChunk]:
+        """按标题/条款优先的策略构建结构化 chunks。"""
+        normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.strip() for line in normalized.splitlines()]
+        blocks: list[tuple[str, list[str]]] = []
+        current_title = doc_id
+        current_lines: list[str] = []
+
+        for line in lines:
+            if not line:
+                if current_lines and current_lines[-1] != "":
+                    current_lines.append("")
+                continue
+            if is_heading(line):
+                if current_lines:
+                    blocks.append((current_title, current_lines))
+                    current_lines = []
+                current_title = line[:120]
+                current_lines = [line]
+                continue
+            current_lines.append(line)
+
+        if current_lines:
+            blocks.append((current_title, current_lines))
+
+        chunks: list[StructuredChunk] = []
+        order = 0
+        for title, block_lines in blocks:
+            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", "\n".join(block_lines)) if p.strip()]
+            if not paragraphs:
+                continue
+
+            buffer: list[str] = []
+            buffer_len = 0
+            for para in paragraphs:
+                para_len = len(para) + (2 if buffer else 0)
+                if buffer and buffer_len + para_len > max_chars:
+                    content = "\n\n".join(buffer).strip()
+                    chunks.append(
+                        StructuredChunk(
+                            doc_id=doc_id,
+                            title=title,
+                            content=content,
+                            chunk_id=f"{doc_id}::chunk{order}",
+                            order=order,
+                        )
+                    )
+                    order += 1
+                    buffer = [para]
+                    buffer_len = len(para)
+                else:
+                    buffer.append(para)
+                    buffer_len += para_len
+            if buffer:
+                content = "\n\n".join(buffer).strip()
+                chunks.append(
+                    StructuredChunk(
+                        doc_id=doc_id,
+                        title=title,
+                        content=content,
+                        chunk_id=f"{doc_id}::chunk{order}",
+                        order=order,
+                    )
+                )
+                order += 1
+
+        if not chunks:
+            chunks.append(
+                StructuredChunk(
+                    doc_id=doc_id,
+                    title=doc_id,
+                    content=normalized[:max_chars].strip(),
+                    chunk_id=f"{doc_id}::chunk0",
+                    order=0,
+                )
+            )
+        return chunks
 
     def _read_document(self, path: Path) -> str:
         """按文件类型读取文档并返回文本。"""
@@ -131,7 +274,7 @@ class DocumentRepository:
         """将 HTML 粗略转为纯文本。"""
         html = re.sub(r"<script[\s\S]*?</script>", " ", html, flags=re.IGNORECASE)
         html = re.sub(r"<style[\s\S]*?</style>", " ", html, flags=re.IGNORECASE)
-        html = re.sub(r"<[^>]+>", " ", html)
+        html = re.sub(r"<[^>]+>", "\n", html)
         html = re.sub(r"[ \t\r\f\v]+", " ", html)
         html = re.sub(r"\n{2,}", "\n\n", html)
         return html.strip()
@@ -157,3 +300,13 @@ class DocumentRepository:
             except Exception:
                 parts.append("")
         return "\n".join(parts).strip()
+
+
+def is_heading(line: str) -> bool:
+    """判断某行是否可视为标题或条款起始。"""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if len(stripped) > 120:
+        return False
+    return any(re.match(pattern, stripped) for pattern in HEADING_PATTERNS)
