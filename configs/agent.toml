@@ -5,7 +5,7 @@ dataset_root = "data/public_dataset_a/public_dataset_upload"
 questions_subdir = "questions/group_a"
 raw_docs_subdir = "raw"
 split = "A"
-output_csv = "answer.csv"
+output_csv = "outputs/answer.csv"
 output_evidence_jsonl = ""
 
 [llm]

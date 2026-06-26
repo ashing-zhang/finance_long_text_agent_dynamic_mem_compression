@@ -84,5 +84,5 @@ class RunConfig:
     questions_subdir: Path
     raw_docs_subdir: Path
     split: str = "A"
-    output_csv: Path = Path("answer.csv")
+    output_csv: Path = Path("outputs/answer.csv")
     output_evidence_jsonl: Path | None = None

@@ -69,7 +69,7 @@ FIN_AGENT_CONFIG=./configs/agent.toml python -m fin_agent.run
 
 ### 4.1 answer.csv
 
-会在 `output_csv` 指定位置生成 `answer.csv`，包含：
+会在 `output_csv` 指定位置生成 `answer.csv`（默认：`outputs/answer.csv`），包含：
 
 - `summary` 行：汇总本次评测的 `prompt_tokens / completion_tokens / total_tokens`
 - 每题一行：`qid / answer / prompt_tokens / completion_tokens / total_tokens`
