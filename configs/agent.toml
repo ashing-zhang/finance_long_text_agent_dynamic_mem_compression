@@ -1,0 +1,22 @@
+log_level = "INFO"
+
+[run]
+dataset_root = "data/public_dataset_a/public_dataset_upload"
+questions_subdir = "questions/group_a"
+raw_docs_subdir = "raw"
+split = "A"
+output_csv = "answer.csv"
+output_evidence_jsonl = ""
+
+[llm]
+base_url = "https://llm-xur4gfd4busltusy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+model = "qwen-plus"
+api_key_env = "DASHSCOPE_API_KEY"
+timeout_seconds = 120.0
+max_retries = 2
+
+[retrieval]
+chunk_max_chars = 1600
+top_k_chunks = 6
+max_context_chars = 8000
+per_doc_top_k = 3
