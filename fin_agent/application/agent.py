@@ -4,7 +4,7 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass
+from fin_agent.compat import dataclass
 from pathlib import Path
 
 from fin_agent.application.domain_specialists import build_domain_supplement
@@ -692,7 +692,7 @@ def compute_domain_specific_boost(
     score = 0.0
 
     if domain == "financial_reports":
-        doc_years = extract_years_from_text(f"{doc_id} {title}")
+        doc_years = set(extract_years_from_text(f"{doc_id} {title}"))
         option_years = set(extract_years_from_text(normalized_option)) | set(extract_years_from_text(" ".join(features.years)))
         if doc_years and option_years and doc_years & option_years:
             score += 0.6

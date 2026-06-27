@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from fin_agent.compat import dataclass
 from pathlib import Path
 
-from fin_agent.domain.models import Question
+from fin_agent.domain.models import AnswerFormat, Question
 
 logger = logging.getLogger(__name__)
 

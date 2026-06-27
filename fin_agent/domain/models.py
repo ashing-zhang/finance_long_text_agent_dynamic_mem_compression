@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
+from fin_agent.compat import dataclass
+from enum import Enum
 from pathlib import Path
+
+try:
+    from enum import StrEnum
+except ImportError:
+    class StrEnum(str, Enum):
+        """Python < 3.11 fallback."""
 
 
 class AnswerFormat(StrEnum):

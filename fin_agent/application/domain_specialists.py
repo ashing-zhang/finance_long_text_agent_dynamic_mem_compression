@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from fin_agent.compat import dataclass
 
 from fin_agent.domain.models import EvidenceSnippet, Question
 from fin_agent.infrastructure.data_access import DocumentRepository

@@ -18,11 +18,12 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
+from fin_agent.compat import dataclass
 from fin_agent.application.agent import configure_logging, run_evaluation
 from fin_agent.domain.models import LlmConfig, RetrievalConfig, RunConfig
 
@@ -125,10 +126,68 @@ def load_toml(path: Path) -> dict:
     try:
         import tomllib
     except Exception:
-        import tomli as tomllib
+        try:
+            import tomli as tomllib
+        except Exception:
+            return parse_simple_toml(path.read_text(encoding="utf-8"))
 
     raw = path.read_bytes()
     return tomllib.loads(raw.decode("utf-8"))
+
+
+def parse_simple_toml(text: str) -> dict:
+    """Parse the limited TOML subset used by this project."""
+    result: dict[str, object] = {}
+    current = result
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("[") and line.endswith("]"):
+            section_name = line[1:-1].strip()
+            if not section_name:
+                continue
+            current = result.setdefault(section_name, {})
+            continue
+
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        current[key] = parse_simple_toml_value(value)
+
+    return result
+
+
+def parse_simple_toml_value(value: str) -> object:
+    """Parse strings, ints, floats and booleans from simple TOML values."""
+    if not value:
+        return ""
+
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+
+    if value[0] in {'"', "'"}:
+        try:
+            return ast.literal_eval(value)
+        except Exception:
+            return value.strip('"').strip("'")
+
+    try:
+        if any(ch in value for ch in (".", "e", "E")):
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
 
 
 def load_dotenv(path: Path) -> None:

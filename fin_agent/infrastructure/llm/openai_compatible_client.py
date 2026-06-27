@@ -6,7 +6,7 @@ import os
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from fin_agent.compat import dataclass
 
 from fin_agent.domain.models import LlmConfig, TokenUsage
 
