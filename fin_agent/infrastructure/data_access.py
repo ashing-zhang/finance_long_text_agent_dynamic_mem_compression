@@ -96,13 +96,28 @@ class DocumentRepository:
         """定位 doc_id 对应的文件路径。"""
         domain_dir = self._raw_root / domain
         if domain == "regulatory":
-            txt_path = domain_dir / "txt" / f"{doc_id}.txt"
-            if txt_path.exists():
-                return DocumentRef(domain=domain, doc_id=doc_id, path=txt_path)
+            preferred_paths = (
+                domain_dir / "txt" / f"{doc_id}.txt",
+                domain_dir / "html" / f"{doc_id}.html",
+                domain_dir / "attachments" / f"{doc_id}.pdf",
+                domain_dir / "attachments" / f"{doc_id}.PDF",
+            )
+            for path in preferred_paths:
+                if path.exists():
+                    return DocumentRef(domain=domain, doc_id=doc_id, path=path)
+
+            candidates: list[Path] = []
+            for search_dir in (domain_dir, domain_dir / "txt", domain_dir / "html", domain_dir / "attachments"):
+                if search_dir.exists():
+                    candidates.extend(search_dir.glob(f"{doc_id}.*"))
+            if not candidates:
+                raise FileNotFoundError(f"找不到文档：domain={domain} doc_id={doc_id}")
+
+            suffix_priority = {".txt": 0, ".html": 1, ".pdf": 2}
+            candidates.sort(key=lambda p: (suffix_priority.get(p.suffix.lower(), 99), p.suffix.lower(), str(p)))
+            return DocumentRef(domain=domain, doc_id=doc_id, path=candidates[0])
 
         candidates = list(domain_dir.glob(f"{doc_id}.*"))
-        if not candidates and domain == "regulatory":
-            candidates = list((domain_dir / "html").glob(f"{doc_id}.html"))
         if not candidates:
             raise FileNotFoundError(f"找不到文档：domain={domain} doc_id={doc_id}")
 
@@ -170,9 +185,16 @@ class DocumentRepository:
             return []
 
         doc_ids: set[str] = set()
-        if domain == "regulatory" and (domain_dir / "txt").exists():
-            for p in (domain_dir / "txt").glob("*.txt"):
-                doc_ids.add(p.stem)
+        if domain == "regulatory":
+            for pattern in ("*.txt", "*.TXT"):
+                for p in (domain_dir / "txt").glob(pattern):
+                    doc_ids.add(p.stem)
+            for pattern in ("*.html", "*.HTML"):
+                for p in (domain_dir / "html").glob(pattern):
+                    doc_ids.add(p.stem)
+            for pattern in ("*.pdf", "*.PDF"):
+                for p in (domain_dir / "attachments").glob(pattern):
+                    doc_ids.add(p.stem)
             return sorted(doc_ids)
 
         for pattern in ("*.pdf", "*.PDF", "*.txt", "*.TXT"):

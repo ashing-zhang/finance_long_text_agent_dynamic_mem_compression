@@ -81,6 +81,40 @@ class EvaluationResult:
 
     answers: list[AnswerRecord]
     total_usage: TokenUsage
+    traces: list["QuestionTrace"]
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalRoundTrace:
+    """单轮检索的结构化 trace。"""
+
+    round_index: int
+    query_mode: str
+    option_queries: dict[str, str]
+    hit_count: int
+    top_hits: list[dict[str, object]]
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalTrace:
+    """检索阶段 trace。"""
+
+    candidate_doc_ids: list[str]
+    rounds: list[RetrievalRoundTrace]
+    used_fallback: bool
+
+
+@dataclass(frozen=True, slots=True)
+class QuestionTrace:
+    """单题 trace，用于写入 logs.csv。"""
+
+    qid: str
+    domain: str
+    question: str
+    options: dict[str, str]
+    thought_trace: dict[str, object]
+    search_trace: dict[str, object]
+    answer_trace: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,18 +150,33 @@ class FinanceLongTextAgent:
         self._docs = docs
         self._retrieval = retrieval
 
-    def answer(self, q: Question) -> tuple[AnswerRecord, list[EvidenceSnippet]]:
-        """回答单题，返回 answer.csv 行与证据片段。"""
+    def answer(self, q: Question) -> tuple[AnswerRecord, list[EvidenceSnippet], QuestionTrace]:
+        """回答单题，返回 answer.csv 行、证据片段与结构化 trace。"""
         plan = self._build_retrieval_plan(q)
         doc_ids = self._select_candidate_docs(q, plan)
-        evidence = self._retrieve_evidence(q, doc_ids, plan)
+        evidence, retrieval_trace = self._retrieve_evidence(q, doc_ids, plan)
         context, refine_usage = self._build_context(q, plan, doc_ids, evidence)
 
-        resp = self._llm.chat(self._build_messages(q=q, context=context))
+        messages = self._build_messages(q=q, context=context)
+        resp = self._llm.chat(messages)
         answer = self._normalize_answer(q.answer_format, resp.content)
         usage = sum_token_usage(refine_usage, resp.usage)
         record = AnswerRecord(qid=q.qid, answer=answer, usage=usage)
-        return record, evidence
+        trace = self._build_question_trace(
+            q=q,
+            plan=plan,
+            doc_ids=doc_ids,
+            retrieval_trace=retrieval_trace,
+            evidence=evidence,
+            context=context,
+            refine_usage=refine_usage,
+            messages=messages,
+            model_output=resp.content,
+            answer=answer,
+            answer_usage=resp.usage,
+            total_usage=usage,
+        )
+        return record, evidence, trace
 
     def _build_retrieval_plan(self, q: Question) -> RetrievalPlan:
         """构造全局 query 与分选项 query。"""
@@ -202,14 +251,24 @@ class FinanceLongTextAgent:
         q: Question,
         doc_ids: list[str],
         plan: RetrievalPlan,
-    ) -> list[EvidenceSnippet]:
-        """执行两阶段检索，返回按 score 排序的证据片段。"""
+    ) -> tuple[list[EvidenceSnippet], RetrievalTrace]:
+        """执行两阶段检索，返回按 score 排序的证据片段与 trace。"""
         merged: dict[str, EvidenceSnippet] = {}
         relaxed_queries = build_relaxed_queries(q=q, plan=plan)
+        round_traces: list[RetrievalRoundTrace] = []
 
         for round_index in range(self._retrieval.max_routing_rounds):
             option_queries = plan.option_queries if round_index == 0 else relaxed_queries
             current_hits = self._retrieve_round(q=q, doc_ids=doc_ids, option_queries=option_queries)
+            round_traces.append(
+                RetrievalRoundTrace(
+                    round_index=round_index + 1,
+                    query_mode=("planned" if round_index == 0 else "relaxed"),
+                    option_queries=dict(option_queries),
+                    hit_count=len(current_hits),
+                    top_hits=summarize_evidence_hits(current_hits, limit=8),
+                )
+            )
             for hit in current_hits:
                 existing = merged.get(hit.chunk_id)
                 if existing is None or hit.score > existing.score:
@@ -217,13 +276,21 @@ class FinanceLongTextAgent:
             if merged:
                 break
 
+        used_fallback = False
         if not merged:
             fallback = self._build_fallback_evidence(q=q, doc_ids=doc_ids)
             for hit in fallback:
                 merged[hit.chunk_id] = hit
+            used_fallback = True
 
         evidence = sorted(merged.values(), key=lambda item: item.score, reverse=True)
-        return evidence[: self._retrieval.top_k_chunks]
+        limited = evidence[: self._retrieval.top_k_chunks]
+        retrieval_trace = RetrievalTrace(
+            candidate_doc_ids=list(doc_ids),
+            rounds=round_traces,
+            used_fallback=used_fallback,
+        )
+        return limited, retrieval_trace
 
     def _retrieve_round(
         self,
@@ -300,7 +367,11 @@ class FinanceLongTextAgent:
         """在检索失败时使用目录与首个 chunk 兜底。"""
         fallback: list[EvidenceSnippet] = []
         for doc_id in doc_ids[: self._retrieval.doc_top_k]:
-            outline = self._docs.build_outline(domain=q.domain, doc_id=doc_id, max_items=6)
+            try:
+                outline = self._docs.build_outline(domain=q.domain, doc_id=doc_id, max_items=6)
+            except Exception as exc:
+                logger.warning("fallback 大纲加载失败：%s/%s %s", q.domain, doc_id, repr(exc))
+                outline = ""
             if outline:
                 fallback.append(
                     EvidenceSnippet(
@@ -468,6 +539,69 @@ class FinanceLongTextAgent:
 
         return normalize_answer_letters(fmt=fmt, text=text)
 
+    def _build_question_trace(
+        self,
+        q: Question,
+        plan: RetrievalPlan,
+        doc_ids: list[str],
+        retrieval_trace: RetrievalTrace,
+        evidence: list[EvidenceSnippet],
+        context: str,
+        refine_usage: TokenUsage,
+        messages: list[ChatMessage],
+        model_output: str,
+        answer: str,
+        answer_usage: TokenUsage,
+        total_usage: TokenUsage,
+    ) -> QuestionTrace:
+        """构建单题的结构化 trace。"""
+        thought_trace = {
+            "global_query": plan.global_query,
+            "option_queries": dict(plan.option_queries),
+            "query_features": {
+                "years": list(plan.features.years),
+                "numbers": list(plan.features.numbers),
+                "clauses": list(plan.features.clauses),
+                "keywords": list(plan.features.keywords),
+            },
+            "domain_hint": DOMAIN_PROMPT_HINTS.get(q.domain, ""),
+            "candidate_doc_ids": list(doc_ids),
+        }
+        search_trace = {
+            "candidate_doc_ids": list(retrieval_trace.candidate_doc_ids),
+            "used_fallback": retrieval_trace.used_fallback,
+            "retrieval_rounds": [
+                {
+                    "round_index": item.round_index,
+                    "query_mode": item.query_mode,
+                    "option_queries": item.option_queries,
+                    "hit_count": item.hit_count,
+                    "top_hits": item.top_hits,
+                }
+                for item in retrieval_trace.rounds
+            ],
+            "evidence": summarize_evidence_hits(evidence, limit=len(evidence)),
+        }
+        answer_trace = {
+            "context_chars": len(context),
+            "context_preview": truncate_text(context, max_chars=1500),
+            "messages": [{"role": m.role, "content": truncate_text(m.content, max_chars=4000)} for m in messages],
+            "refine_usage": token_usage_to_dict(refine_usage),
+            "answer_usage": token_usage_to_dict(answer_usage),
+            "total_usage": token_usage_to_dict(total_usage),
+            "model_output": model_output,
+            "normalized_answer": answer,
+        }
+        return QuestionTrace(
+            qid=q.qid,
+            domain=q.domain,
+            question=q.question,
+            options=dict(q.options),
+            thought_trace=thought_trace,
+            search_trace=search_trace,
+            answer_trace=answer_trace,
+        )
+
 
 def extract_query_features(text: str) -> QueryFeatures:
     """抽取时间、数值、法条与关键词特征。"""
@@ -583,12 +717,15 @@ def build_grouped_context(
     else:
         sections.append("## 汇总证据")
         for doc_id in doc_ids:
-            outline = docs.build_outline(domain=q.domain, doc_id=doc_id, max_items=6)
+            try:
+                outline = docs.build_outline(domain=q.domain, doc_id=doc_id, max_items=6)
+            except Exception:
+                continue
             if outline:
                 sections.append(f"- [{doc_id}] {outline}")
     return "\n".join(sections).strip()
 
-
+ 
 def normalize_text(text: str) -> str:
     """规范化文本空白。"""
     return re.sub(r"\s+", " ", text or "").strip()
@@ -938,6 +1075,38 @@ def sum_token_usage(*items: TokenUsage) -> TokenUsage:
     )
 
 
+def token_usage_to_dict(usage: TokenUsage) -> dict[str, int]:
+    """将 TokenUsage 转为可序列化 dict。"""
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    }
+
+
+def truncate_text(text: str, max_chars: int) -> str:
+    """截断文本，避免日志列过长。"""
+    normalized = (text or "").strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 15].rstrip() + "\n...(truncated)"
+
+
+def summarize_evidence_hits(items: list[EvidenceSnippet], limit: int) -> list[dict[str, object]]:
+    """将证据片段压缩为更适合日志记录的摘要。"""
+    return [
+        {
+            "doc_id": item.doc_id,
+            "title": item.title,
+            "chunk_id": item.chunk_id,
+            "score": round(float(item.score), 4),
+            "option_key": item.option_key,
+            "content_preview": truncate_text(item.content, max_chars=240),
+        }
+        for item in items[:limit]
+    ]
+
+
 def write_answer_csv(path: Path, records: list[AnswerRecord]) -> None:
     """写入符合提交格式的 answer.csv。"""
     import csv
@@ -953,6 +1122,38 @@ def write_answer_csv(path: Path, records: list[AnswerRecord]) -> None:
         writer.writerow(["summary", "", total_prompt, total_completion, total_total])
         for r in records:
             writer.writerow([r.qid, r.answer, r.usage.prompt_tokens, r.usage.completion_tokens, r.usage.total_tokens])
+
+
+def write_logs_csv(path: Path, traces: list[QuestionTrace]) -> None:
+    """写入包含单题 thought/search/answer trace 的 logs.csv。"""
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "qid",
+                "domain",
+                "question",
+                "options_json",
+                "thought_trace_json",
+                "search_trace_json",
+                "answer_trace_json",
+            ]
+        )
+        for trace in traces:
+            writer.writerow(
+                [
+                    trace.qid,
+                    trace.domain,
+                    trace.question,
+                    json.dumps(trace.options, ensure_ascii=False),
+                    json.dumps(trace.thought_trace, ensure_ascii=False),
+                    json.dumps(trace.search_trace, ensure_ascii=False),
+                    json.dumps(trace.answer_trace, ensure_ascii=False),
+                ]
+            )
 
 
 def write_evidence_jsonl(path: Path, q: Question, evidence: list[EvidenceSnippet]) -> None:
@@ -993,13 +1194,15 @@ def run_evaluation(run: RunConfig, llm: LlmConfig, retrieval: RetrievalConfig) -
     logger.info("加载题目：%s（split=%s）", len(questions), run.split)
 
     records: list[AnswerRecord] = []
+    traces: list[QuestionTrace] = []
     total_prompt = 0
     total_completion = 0
 
     for idx, q in enumerate(questions, start=1):
         logger.info("作答中：%s (%s/%s)", q.qid, idx, len(questions))
-        record, evidence = agent.answer(q)
+        record, evidence, trace = agent.answer(q)
         records.append(record)
+        traces.append(trace)
         total_prompt += record.usage.prompt_tokens
         total_completion += record.usage.completion_tokens
 
@@ -1007,9 +1210,10 @@ def run_evaluation(run: RunConfig, llm: LlmConfig, retrieval: RetrievalConfig) -
             write_evidence_jsonl(run.output_evidence_jsonl, q=q, evidence=evidence)
 
     write_answer_csv(run.output_csv, records=records)
+    write_logs_csv(run.output_csv.parent / "logs.csv", traces=traces)
     total_usage = TokenUsage(
         prompt_tokens=total_prompt,
         completion_tokens=total_completion,
         total_tokens=total_prompt + total_completion,
     )
-    return EvaluationResult(answers=records, total_usage=total_usage)
+    return EvaluationResult(answers=records, total_usage=total_usage, traces=traces)
