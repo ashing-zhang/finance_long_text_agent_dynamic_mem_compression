@@ -7,6 +7,7 @@ from fin_agent.compat import dataclass
 from pathlib import Path
 
 from fin_agent.domain.models import AnswerFormat, Question
+from fin_agent.infrastructure.heading_detection import LlmHeadingDetector
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +87,13 @@ class QuestionRepository:
 class DocumentRepository:
     """从 raw 目录按 doc_id 加载文档文本与结构化 chunks。"""
 
-    def __init__(self, raw_root: Path) -> None:
+    def __init__(self, raw_root: Path, heading_detector: LlmHeadingDetector | None = None) -> None:
         """初始化仓库。"""
         self._raw_root = raw_root
+        self._heading_detector = heading_detector
         self._text_cache: dict[tuple[str, str], str] = {}
         self._chunk_cache: dict[tuple[str, str, int], list[StructuredChunk]] = {}
+        self._heading_line_cache: dict[tuple[str, str], set[str]] = {}
 
     def resolve(self, domain: str, doc_id: str) -> DocumentRef:
         """定位 doc_id 对应的文件路径。"""
@@ -144,7 +147,7 @@ class DocumentRepository:
             return cached
 
         text = self.load_text(domain=domain, doc_id=doc_id)
-        chunks = self._build_structured_chunks(doc_id=doc_id, text=text, max_chars=max_chars)
+        chunks = self._build_structured_chunks(domain=domain, doc_id=doc_id, text=text, max_chars=max_chars)
         self._chunk_cache[cache_key] = chunks
         return chunks
 
@@ -169,10 +172,11 @@ class DocumentRepository:
     def build_outline(self, domain: str, doc_id: str, max_items: int = 8) -> str:
         """提取文档核心大纲，供回退路由使用。"""
         text = self.load_text(domain=domain, doc_id=doc_id)
+        llm_heading_lines = self._get_llm_heading_lines(domain=domain, doc_id=doc_id, text=text)
         headings: list[str] = []
         for line in text.splitlines():
             stripped = line.strip()
-            if stripped and is_heading(stripped):
+            if stripped and self._is_heading_line(stripped, llm_heading_lines):
                 headings.append(stripped)
             if len(headings) >= max_items:
                 break
@@ -202,10 +206,11 @@ class DocumentRepository:
                 doc_ids.add(p.stem)
         return sorted(doc_ids)
 
-    def _build_structured_chunks(self, doc_id: str, text: str, max_chars: int) -> list[StructuredChunk]:
+    def _build_structured_chunks(self, domain: str, doc_id: str, text: str, max_chars: int) -> list[StructuredChunk]:
         """按标题/条款优先的策略构建结构化 chunks。"""
         normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
         lines = [line.strip() for line in normalized.splitlines()]
+        llm_heading_lines = self._get_llm_heading_lines(domain=domain, doc_id=doc_id, text=normalized)
         blocks: list[tuple[str, list[str]]] = []
         current_title = doc_id
         current_lines: list[str] = []
@@ -215,7 +220,7 @@ class DocumentRepository:
                 if current_lines and current_lines[-1] != "":
                     current_lines.append("")
                 continue
-            if is_heading(line):
+            if self._is_heading_line(line, llm_heading_lines):
                 if current_lines:
                     blocks.append((current_title, current_lines))
                     current_lines = []
@@ -279,6 +284,26 @@ class DocumentRepository:
                 )
             )
         return chunks
+
+    def _get_llm_heading_lines(self, domain: str, doc_id: str, text: str) -> set[str]:
+        if self._heading_detector is None:
+            return set()
+        cache_key = (domain, doc_id)
+        cached = self._heading_line_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        lines = [line.strip() for line in text.splitlines() if line.strip() and not is_heading(line)]
+        detected = self._heading_detector.classify_candidates(doc_id=doc_id, lines=lines)
+        self._heading_line_cache[cache_key] = detected
+        return detected
+
+    def _is_heading_line(self, line: str, llm_heading_lines: set[str]) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return False
+        if is_heading(stripped):
+            return True
+        return stripped in llm_heading_lines
 
     def _read_document(self, path: Path) -> str:
         """按文件类型读取文档并返回文本。"""

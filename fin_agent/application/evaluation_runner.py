@@ -7,6 +7,7 @@ from fin_agent.application.io_utils import write_answer_csv, write_evidence_json
 from fin_agent.application.tracing import EvaluationResult
 from fin_agent.domain.models import LlmConfig, RetrievalConfig, RunConfig, TokenUsage
 from fin_agent.infrastructure.data_access import DocumentRepository, QuestionRepository
+from fin_agent.infrastructure.heading_detection import LlmHeadingDetector
 from fin_agent.infrastructure.llm.openai_compatible_client import OpenAiCompatibleChatClient
 
 logger = logging.getLogger(__name__)
@@ -16,10 +17,9 @@ def run_evaluation(run: RunConfig, llm: LlmConfig, retrieval: RetrievalConfig) -
     questions_dir = run.dataset_root / run.questions_subdir
     raw_docs_root = run.dataset_root / run.raw_docs_subdir
 
-    q_repo = QuestionRepository(questions_dir=questions_dir)
-    d_repo = DocumentRepository(raw_root=raw_docs_root)
-
     client = OpenAiCompatibleChatClient(llm)
+    q_repo = QuestionRepository(questions_dir=questions_dir)
+    d_repo = DocumentRepository(raw_root=raw_docs_root, heading_detector=LlmHeadingDetector(client=client))
     agent = FinanceLongTextAgent(llm=client, docs=d_repo, retrieval=retrieval)
 
     questions = q_repo.load_questions(split=run.split)
@@ -49,4 +49,3 @@ def run_evaluation(run: RunConfig, llm: LlmConfig, retrieval: RetrievalConfig) -
         total_tokens=total_prompt + total_completion,
     )
     return EvaluationResult(answers=records, total_usage=total_usage, traces=traces)
-
