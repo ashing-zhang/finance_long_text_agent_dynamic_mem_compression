@@ -134,6 +134,7 @@ class RetrievalPlan:
     global_query: str
     option_queries: dict[str, str]
     features: QueryFeatures
+    option_features: dict[str, QueryFeatures]
 
 
 class FinanceLongTextAgent:
@@ -149,10 +150,11 @@ class FinanceLongTextAgent:
         self._llm = llm
         self._docs = docs
         self._retrieval = retrieval
+        self._query_feature_cache: dict[str, tuple[QueryFeatures, dict[str, QueryFeatures]]] = {}
 
     def answer(self, q: Question) -> tuple[AnswerRecord, list[EvidenceSnippet], QuestionTrace]:
         """回答单题，返回 answer.csv 行、证据片段与结构化 trace。"""
-        plan = self._build_retrieval_plan(q)
+        plan, feature_usage = self._build_retrieval_plan(q)
         doc_ids = self._select_candidate_docs(q, plan)
         evidence, retrieval_trace = self._retrieve_evidence(q, doc_ids, plan)
         context, refine_usage = self._build_context(q, plan, doc_ids, evidence)
@@ -160,7 +162,7 @@ class FinanceLongTextAgent:
         messages = self._build_messages(q=q, context=context)
         resp = self._llm.chat(messages)
         answer = self._normalize_answer(q.answer_format, resp.content)
-        usage = sum_token_usage(refine_usage, resp.usage)
+        usage = sum_token_usage(feature_usage, refine_usage, resp.usage)
         record = AnswerRecord(qid=q.qid, answer=answer, usage=usage)
         trace = self._build_question_trace(
             q=q,
@@ -175,13 +177,13 @@ class FinanceLongTextAgent:
             answer=answer,
             answer_usage=resp.usage,
             total_usage=usage,
+            feature_usage=feature_usage,
         )
         return record, evidence, trace
 
-    def _build_retrieval_plan(self, q: Question) -> RetrievalPlan:
+    def _build_retrieval_plan(self, q: Question) -> tuple[RetrievalPlan, TokenUsage]:
         """构造全局 query 与分选项 query。"""
         global_query = self._build_query(q)
-        global_features = extract_query_features(global_query)
         option_queries: dict[str, str] = {}
         for key in sorted(q.options.keys()):
             option_text = q.options[key]
@@ -193,7 +195,114 @@ class FinanceLongTextAgent:
                 ]
             ).strip()
             option_queries[key] = option_query
-        return RetrievalPlan(global_query=global_query, option_queries=option_queries, features=global_features)
+        global_features, option_features, usage = self._extract_plan_features_with_llm(
+            domain=q.domain,
+            global_query=global_query,
+            option_queries=option_queries,
+        )
+        plan = RetrievalPlan(
+            global_query=global_query,
+            option_queries=option_queries,
+            features=global_features,
+            option_features=option_features,
+        )
+        return plan, usage
+
+    def _extract_plan_features_with_llm(
+        self,
+        domain: str,
+        global_query: str,
+        option_queries: dict[str, str],
+    ) -> tuple[QueryFeatures, dict[str, QueryFeatures], TokenUsage]:
+        cache_key = json.dumps(
+            {
+                "domain": domain,
+                "global_query": global_query,
+                "option_queries": {k: option_queries[k] for k in sorted(option_queries.keys())},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        cached = self._query_feature_cache.get(cache_key)
+        if cached is not None:
+            return cached[0], dict(cached[1]), zero_token_usage()
+
+        messages = [
+            ChatMessage(
+                role="system",
+                content=(
+                    "你是信息抽取器，负责从查询文本中提取检索特征。"
+                    "你必须严格从输入文本中抽取“原文子串”，不得改写、不得引入外部知识。"
+                    "只输出 JSON，不要输出任何解释。"
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"领域：{domain}\n\n"
+                    "请对以下查询文本抽取特征，输出 JSON，格式如下：\n"
+                    "{\n"
+                    '  "global": {"years": [], "numbers": [], "clauses": [], "keywords": []},\n'
+                    '  "options": {\n'
+                    '    "A": {"years": [], "numbers": [], "clauses": [], "keywords": []}\n'
+                    "  }\n"
+                    "}\n\n"
+                    "抽取要求：\n"
+                    "- years：仅保留 4 位年份（如 2024、2025），必须在原文出现。\n"
+                    "- numbers：保留带单位的数值原文子串（如 6.5亿元、75%、30天、1个月），必须在原文出现。\n"
+                    "- clauses：保留条款编号原文子串（如 第四十七条、第3章），必须在原文出现。\n"
+                    "- keywords：保留 6~18 个能区分检索的关键词/术语，必须在原文出现；优先保留金融专有名词、主体、评级、产品名、条款名；避免整句。\n"
+                    "- 对英文/缩写请保持原样（例如 AAA）。\n"
+                    "- 去重后输出。\n\n"
+                    f"global_query:\n{global_query}\n\n"
+                    "option_queries:\n"
+                    + "\n".join(f"{k}:\n{option_queries[k]}" for k in sorted(option_queries.keys()))
+                ),
+            ),
+        ]
+        try:
+            resp = self._llm.chat(messages)
+            payload = extract_json_payload(resp.content)
+            global_features = self._parse_features_payload(payload.get("global") if isinstance(payload, dict) else None)
+            option_features: dict[str, QueryFeatures] = {}
+            options_payload = payload.get("options") if isinstance(payload, dict) else None
+            for key in sorted(option_queries.keys()):
+                item = options_payload.get(key) if isinstance(options_payload, dict) else None
+                option_features[key] = self._parse_features_payload(item)
+            self._query_feature_cache[cache_key] = (global_features, dict(option_features))
+            return global_features, option_features, resp.usage
+        except Exception as exc:
+            logger.warning("LLM 特征抽取失败，回退正则：%s", repr(exc))
+            global_features = self._extract_query_features_regex(global_query)
+            option_features = {k: self._extract_query_features_regex(v) for k, v in option_queries.items()}
+            self._query_feature_cache[cache_key] = (global_features, dict(option_features))
+            return global_features, option_features, zero_token_usage()
+
+    def _parse_features_payload(self, payload: object) -> QueryFeatures:
+        if not isinstance(payload, dict):
+            return QueryFeatures(years=(), numbers=(), clauses=(), keywords=())
+
+        years_raw = payload.get("years")
+        numbers_raw = payload.get("numbers")
+        clauses_raw = payload.get("clauses")
+        keywords_raw = payload.get("keywords")
+
+        years = tuple(sorted({str(x).strip() for x in (years_raw if isinstance(years_raw, list) else []) if str(x).strip()}))
+        years = tuple(y for y in years if re.fullmatch(r"(?:19|20)\d{2}", y))
+
+        numbers = tuple(
+            sorted({str(x).strip() for x in (numbers_raw if isinstance(numbers_raw, list) else []) if str(x).strip()})
+        )
+        clauses = tuple(
+            sorted({str(x).strip() for x in (clauses_raw if isinstance(clauses_raw, list) else []) if str(x).strip()})
+        )
+        keywords = tuple(
+            sorted({str(x).strip() for x in (keywords_raw if isinstance(keywords_raw, list) else []) if str(x).strip()})
+        )
+        return QueryFeatures(years=years, numbers=numbers, clauses=clauses, keywords=keywords)
+
+    def _extract_query_features_regex(self, text: str) -> QueryFeatures:
+        return extract_query_features(text)
 
     def _build_query(self, q: Question) -> str:
         """构造检索 query。"""
@@ -259,7 +368,12 @@ class FinanceLongTextAgent:
 
         for round_index in range(self._retrieval.max_routing_rounds):
             option_queries = plan.option_queries if round_index == 0 else relaxed_queries
-            current_hits = self._retrieve_round(q=q, doc_ids=doc_ids, option_queries=option_queries)
+            current_hits = self._retrieve_round(
+                q=q,
+                doc_ids=doc_ids,
+                option_queries=option_queries,
+                option_features=plan.option_features,
+            )
             round_traces.append(
                 RetrievalRoundTrace(
                     round_index=round_index + 1,
@@ -297,11 +411,12 @@ class FinanceLongTextAgent:
         q: Question,
         doc_ids: list[str],
         option_queries: dict[str, str],
+        option_features: dict[str, QueryFeatures],
     ) -> list[EvidenceSnippet]:
         """执行一轮选项级段落召回。"""
         results: list[EvidenceSnippet] = []
         for option_key, option_query in option_queries.items():
-            option_features = extract_query_features(option_query)
+            option_feature = option_features.get(option_key) or self._extract_query_features_regex(option_query)
             for doc_id in doc_ids:
                 try:
                     chunks = self._docs.load_chunks(
@@ -321,7 +436,7 @@ class FinanceLongTextAgent:
                     boosted = base_score + compute_symbolic_boost(
                         text=chunk.content,
                         title=chunk.title,
-                        features=option_features,
+                        features=option_feature,
                         domain=q.domain,
                     )
                     boosted += compute_domain_specific_boost(
@@ -330,7 +445,7 @@ class FinanceLongTextAgent:
                         doc_id=chunk.doc_id,
                         title=chunk.title,
                         text=chunk.content,
-                        features=option_features,
+                        features=option_feature,
                     )
                     focused_content = focus_chunk_content(
                         domain=q.domain,
@@ -553,6 +668,7 @@ class FinanceLongTextAgent:
         answer: str,
         answer_usage: TokenUsage,
         total_usage: TokenUsage,
+        feature_usage: TokenUsage,
     ) -> QuestionTrace:
         """构建单题的结构化 trace。"""
         thought_trace = {
@@ -586,6 +702,7 @@ class FinanceLongTextAgent:
             "context_chars": len(context),
             "context_preview": truncate_text(context, max_chars=1500),
             "messages": [{"role": m.role, "content": truncate_text(m.content, max_chars=4000)} for m in messages],
+            "feature_usage": token_usage_to_dict(feature_usage),
             "refine_usage": token_usage_to_dict(refine_usage),
             "answer_usage": token_usage_to_dict(answer_usage),
             "total_usage": token_usage_to_dict(total_usage),
