@@ -59,7 +59,7 @@
   - `FinanceLongTextAgent.answer()`：单题端到端主流程（检索→压缩→推理→后处理）。
   - `run_evaluation()`：批处理评测，产出 `answer.csv`、`logs.csv`，可选写 `evidence.jsonl`。
   - 关键机制：
-    - **两阶段检索**：文档级粗筛（doc_profile）→ 选项级 chunk 召回。
+    - **两阶段检索**：文档级粗筛（doc\_profile）→ 选项级 chunk 召回。
     - **检索加权**：BM25 基础分 + 符号化特征加权（年份/金额/条款号/关键词）+ 领域定制 boost。
     - **上下文动态压缩**：先本地压缩，超过阈值再调用 Qwen 做“证据精筛”。
     - **输出护栏**：要求模型仅输出 JSON；本地解析与答案规范化，保障格式可评测。
@@ -67,7 +67,7 @@
 
 ### 3.3 领域专家（Domain Specialists）
 
-- [domain_specialists.py](file:///d:/codes/finance_long_text_agent_dynamic_mem_compression/fin_agent/application/domain_specialists.py)
+- [domain\_specialists.py](file:///d:/codes/finance_long_text_agent_dynamic_mem_compression/fin_agent/application/domain_specialists.py)
   - 作用：把“领域定制的证据补充、变量/公式抽取、本地规则计算提示”集中管理，避免核心 Agent 膨胀。
   - 当前覆盖：
     - `financial_reports`：指标别名标准化、跨文档双向核验提示、指标句与数值快照抽取、年份比对备注。
@@ -76,7 +76,7 @@
 
 ### 3.4 基础设施层（数据访问与文档结构化）
 
-- [data_access.py](file:///d:/codes/finance_long_text_agent_dynamic_mem_compression/fin_agent/infrastructure/data_access.py)
+- [data\_access.py](file:///d:/codes/finance_long_text_agent_dynamic_mem_compression/fin_agent/infrastructure/data_access.py)
   - `QuestionRepository`：从 `questions/*.json` 加载题目。
   - `DocumentRepository`：按 `doc_id` 解析文档文本、构建结构化分块（chunk）。
   - 核心设计：
@@ -86,7 +86,7 @@
 
 ### 3.5 LLM 客户端
 
-- [openai_compatible_client.py](file:///d:/codes/finance_long_text_agent_dynamic_mem_compression/fin_agent/infrastructure/llm/openai_compatible_client.py)
+- [openai\_compatible\_client.py](file:///d:/codes/finance_long_text_agent_dynamic_mem_compression/fin_agent/infrastructure/llm/openai_compatible_client.py)
   - 通过 OpenAI-compatible `POST /chat/completions` 调用 Qwen。
   - 解析 `usage`，用于 `answer.csv` 统计 Token。
   - 内置重试与超时，避免评测过程中因偶发网络错误中断。
@@ -101,10 +101,10 @@
 
 ### 4.1 检索计划（Query Plan）
 
-**输入**：题干 + A/B/C/D 选项。  
+**输入**：题干 + A/B/C/D 选项。\
 **输出**：
 
-- `global_query`：用于文档级粗筛（B 组未知 doc_ids 时）。
+- `global_query`：用于文档级粗筛（B 组未知 doc\_ids 时）。
 - `option_queries`：对每个选项构造更“判别性”的查询（题干 + 选项文本 + 领域扩展词）。
 - `QueryFeatures`：抽取年份、数值单位、条款编号、关键词，用于后续加权与放宽检索。
 
@@ -183,7 +183,7 @@
 - **检索与加权（application/agent）**
   - 优化符号化 boost 的特征：金额单位一致性、比例/期限的近邻匹配、条款号的强匹配。
   - 放宽检索（relaxed queries）策略可更“可控”：只在命中失败时引入少量扩展词，避免噪声。
-- **压缩与提示（application + domain_specialists）**
+- **压缩与提示（application + domain\_specialists）**
   - 将压缩 prompt 进一步结构化为“保留/丢弃”的判别式输出，减少模型自由发挥。
   - 领域专家产出更规范的“可引用证据要点”，降低最终推理的 token 需求。
 - **输出护栏与可观测性**
