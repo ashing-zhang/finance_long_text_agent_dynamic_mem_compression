@@ -4,6 +4,7 @@ import logging
 import tempfile
 from fin_agent.compat import dataclass
 from pathlib import Path
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -42,27 +43,37 @@ class MineruMarkdownConverter:
 
 
 def split_markdown_by_headers(markdown_text: str) -> list[MarkdownSection]:
-    MarkdownHeaderTextSplitter = _import_markdown_splitter()
-    splitter = MarkdownHeaderTextSplitter(
-        headers_to_split_on=[
-            ("#", "h1"),
-            ("##", "h2"),
-            ("###", "h3"),
-            ("####", "h4"),
-            ("#####", "h5"),
-            ("######", "h6"),
-        ],
-        strip_headers=False,
-    )
-    documents = splitter.split_text(markdown_text or "")
+    """按 Markdown 标题（#..######）切分为 sections。"""
+    lines = (markdown_text or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+    stack: list[tuple[int, str]] = []
+    buffer: list[str] = []
     sections: list[MarkdownSection] = []
-    for doc in documents:
-        content = (getattr(doc, "page_content", "") or "").strip()
-        metadata = {str(k): str(v) for k, v in (getattr(doc, "metadata", {}) or {}).items()}
-        title = _build_section_title(metadata=metadata, content=content)
+
+    def flush() -> None:
+        content = "\n".join(buffer).strip()
         if not content:
+            return
+        metadata = {f"h{level}": title for level, title in stack}
+        title = " / ".join([t for _, t in stack])[:120] if stack else "markdown_section"
+        sections.append(MarkdownSection(title=title or "markdown_section", content=content, metadata=metadata))
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        match = heading_re.match(line.strip())
+        if match:
+            flush()
+            buffer = [line]
+            level = len(match.group(1))
+            title_text = match.group(2).strip()
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, title_text))
             continue
-        sections.append(MarkdownSection(title=title, content=content, metadata=metadata))
+        buffer.append(line)
+
+    flush()
     return sections
 
 
@@ -105,17 +116,3 @@ def _import_mineru():
             "需要安装 MinerU 才能将 PDF 转为 Markdown。建议安装：pip install mineru"
         ) from exc
     return do_parse, read_fn
-
-
-def _import_markdown_splitter():
-    try:
-        from langchain_text_splitters import MarkdownHeaderTextSplitter
-        return MarkdownHeaderTextSplitter
-    except Exception:
-        try:
-            from langchain.text_splitter import MarkdownHeaderTextSplitter
-            return MarkdownHeaderTextSplitter
-        except Exception as exc:
-            raise RuntimeError(
-                "需要安装 LangChain Markdown 标题切分器。建议安装：pip install langchain-text-splitters"
-            ) from exc

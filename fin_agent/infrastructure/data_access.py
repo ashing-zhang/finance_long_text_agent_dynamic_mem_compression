@@ -177,7 +177,7 @@ class DocumentRepository:
         """提取文档核心大纲，供回退路由使用。"""
         text = self.load_text(domain=domain, doc_id=doc_id)
         ref = self.resolve(domain=domain, doc_id=doc_id)
-        if ref.path.suffix.lower() == ".pdf" and text.lstrip().startswith("#"):
+        if ref.path.suffix.lower() in (".md", ".markdown") or text.lstrip().startswith("#"):
             return "\n".join(extract_markdown_headings(text, max_items=max_items))
         headings: list[str] = []
         for line in text.splitlines():
@@ -207,7 +207,7 @@ class DocumentRepository:
                     doc_ids.add(p.stem)
             return sorted(doc_ids)
 
-        for pattern in ("*.pdf", "*.PDF", "*.txt", "*.TXT"):
+        for pattern in ("*.pdf", "*.PDF", "*.txt", "*.TXT", "*.md", "*.MD", "*.markdown", "*.MARKDOWN"):
             for p in domain_dir.glob(pattern):
                 doc_ids.add(p.stem)
         return sorted(doc_ids)
@@ -215,7 +215,7 @@ class DocumentRepository:
     def _build_structured_chunks(self, domain: str, doc_id: str, text: str, max_chars: int) -> list[StructuredChunk]:
         """按标题/条款优先的策略构建结构化 chunks。"""
         ref = self.resolve(domain=domain, doc_id=doc_id)
-        if ref.path.suffix.lower() == ".pdf" and text.lstrip().startswith("#"):
+        if ref.path.suffix.lower() in (".md", ".markdown") or text.lstrip().startswith("#"):
             chunks = self._build_markdown_chunks(doc_id=doc_id, markdown_text=text, max_chars=max_chars)
             if chunks:
                 return chunks
