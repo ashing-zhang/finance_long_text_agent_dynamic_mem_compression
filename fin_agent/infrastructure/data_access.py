@@ -103,7 +103,10 @@ class DocumentRepository:
         """定位 doc_id 对应的文件路径。"""
         domain_dir = self._raw_root / domain
         if domain == "regulatory":
+            md_dir = domain_dir / "md"
             preferred_paths = (
+                md_dir / f"{doc_id}.md",
+                md_dir / f"{doc_id}.markdown",
                 domain_dir / "txt" / f"{doc_id}.txt",
                 domain_dir / "html" / f"{doc_id}.html",
                 domain_dir / "attachments" / f"{doc_id}.pdf",
@@ -114,21 +117,42 @@ class DocumentRepository:
                     return DocumentRef(domain=domain, doc_id=doc_id, path=path)
 
             candidates: list[Path] = []
-            for search_dir in (domain_dir, domain_dir / "txt", domain_dir / "html", domain_dir / "attachments"):
+            for search_dir in (md_dir, domain_dir, domain_dir / "txt", domain_dir / "html", domain_dir / "attachments"):
                 if search_dir.exists():
                     candidates.extend(search_dir.glob(f"{doc_id}.*"))
             if not candidates:
                 raise FileNotFoundError(f"找不到文档：domain={domain} doc_id={doc_id}")
 
-            suffix_priority = {".txt": 0, ".html": 1, ".pdf": 2}
+            suffix_priority = {".md": 0, ".markdown": 1, ".txt": 2, ".html": 3, ".pdf": 4}
             candidates.sort(key=lambda p: (suffix_priority.get(p.suffix.lower(), 99), p.suffix.lower(), str(p)))
             return DocumentRef(domain=domain, doc_id=doc_id, path=candidates[0])
 
-        candidates = list(domain_dir.glob(f"{doc_id}.*"))
+        md_dir = domain_dir / "md"
+        preferred_paths = (
+            md_dir / f"{doc_id}.md",
+            md_dir / f"{doc_id}.markdown",
+            domain_dir / f"{doc_id}.md",
+            domain_dir / f"{doc_id}.markdown",
+            domain_dir / f"{doc_id}.txt",
+            domain_dir / f"{doc_id}.TXT",
+            domain_dir / f"{doc_id}.html",
+            domain_dir / f"{doc_id}.HTML",
+            domain_dir / f"{doc_id}.pdf",
+            domain_dir / f"{doc_id}.PDF",
+        )
+        for path in preferred_paths:
+            if path.exists():
+                return DocumentRef(domain=domain, doc_id=doc_id, path=path)
+
+        candidates: list[Path] = []
+        for search_dir in (md_dir, domain_dir):
+            if search_dir.exists():
+                candidates.extend(search_dir.glob(f"{doc_id}.*"))
         if not candidates:
             raise FileNotFoundError(f"找不到文档：domain={domain} doc_id={doc_id}")
 
-        candidates.sort(key=lambda p: p.suffix.lower())
+        suffix_priority = {".md": 0, ".markdown": 1, ".txt": 2, ".html": 3, ".pdf": 4}
+        candidates.sort(key=lambda p: (suffix_priority.get(p.suffix.lower(), 99), p.suffix.lower(), str(p)))
         return DocumentRef(domain=domain, doc_id=doc_id, path=candidates[0])
 
     def load_text(self, domain: str, doc_id: str) -> str:
@@ -196,6 +220,11 @@ class DocumentRepository:
 
         doc_ids: set[str] = set()
         if domain == "regulatory":
+            md_dir = domain_dir / "md"
+            for pattern in ("*.md", "*.MD", "*.markdown", "*.MARKDOWN"):
+                if md_dir.exists():
+                    for p in md_dir.glob(pattern):
+                        doc_ids.add(p.stem)
             for pattern in ("*.txt", "*.TXT"):
                 for p in (domain_dir / "txt").glob(pattern):
                     doc_ids.add(p.stem)
@@ -207,6 +236,11 @@ class DocumentRepository:
                     doc_ids.add(p.stem)
             return sorted(doc_ids)
 
+        md_dir = domain_dir / "md"
+        for pattern in ("*.md", "*.MD", "*.markdown", "*.MARKDOWN"):
+            if md_dir.exists():
+                for p in md_dir.glob(pattern):
+                    doc_ids.add(p.stem)
         for pattern in ("*.pdf", "*.PDF", "*.txt", "*.TXT", "*.md", "*.MD", "*.markdown", "*.MARKDOWN"):
             for p in domain_dir.glob(pattern):
                 doc_ids.add(p.stem)
@@ -342,7 +376,7 @@ class DocumentRepository:
     def _read_document(self, path: Path) -> str:
         """按文件类型读取文档并返回文本。"""
         suffix = path.suffix.lower()
-        if suffix in {".txt", ".md"}:
+        if suffix in {".txt", ".md", ".markdown"}:
             return path.read_text(encoding="utf-8", errors="ignore")
         if suffix == ".html":
             html = path.read_text(encoding="utf-8", errors="ignore")
