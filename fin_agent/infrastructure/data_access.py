@@ -7,11 +7,16 @@ from fin_agent.compat import dataclass
 from pathlib import Path
 
 from fin_agent.domain.models import AnswerFormat, Question
-from fin_agent.infrastructure.heading_detection import LlmHeadingDetector
+from fin_agent.infrastructure.heading_detection import (
+    MineruMarkdownConverter,
+    extract_markdown_headings,
+    split_markdown_by_headers,
+)
 
 logger = logging.getLogger(__name__)
 
 HEADING_PATTERNS = (
+    r"^#{1,6}\s+.*$",
     r"^第[一二三四五六七八九十百千万0-9]+[编章节条款]\s*.*$",
     r"^[一二三四五六七八九十]+[、.]\s*.*$",
     r"^[(（]?[一二三四五六七八九十0-9]+[)）][、.]?\s*.*$",
@@ -87,13 +92,12 @@ class QuestionRepository:
 class DocumentRepository:
     """从 raw 目录按 doc_id 加载文档文本与结构化 chunks。"""
 
-    def __init__(self, raw_root: Path, heading_detector: LlmHeadingDetector | None = None) -> None:
+    def __init__(self, raw_root: Path, markdown_converter: MineruMarkdownConverter | None = None) -> None:
         """初始化仓库。"""
         self._raw_root = raw_root
-        self._heading_detector = heading_detector
+        self._markdown_converter = markdown_converter
         self._text_cache: dict[tuple[str, str], str] = {}
         self._chunk_cache: dict[tuple[str, str, int], list[StructuredChunk]] = {}
-        self._heading_line_cache: dict[tuple[str, str], set[str]] = {}
 
     def resolve(self, domain: str, doc_id: str) -> DocumentRef:
         """定位 doc_id 对应的文件路径。"""
@@ -172,11 +176,13 @@ class DocumentRepository:
     def build_outline(self, domain: str, doc_id: str, max_items: int = 8) -> str:
         """提取文档核心大纲，供回退路由使用。"""
         text = self.load_text(domain=domain, doc_id=doc_id)
-        llm_heading_lines = self._get_llm_heading_lines(domain=domain, doc_id=doc_id, text=text)
+        ref = self.resolve(domain=domain, doc_id=doc_id)
+        if ref.path.suffix.lower() == ".pdf" and text.lstrip().startswith("#"):
+            return "\n".join(extract_markdown_headings(text, max_items=max_items))
         headings: list[str] = []
         for line in text.splitlines():
             stripped = line.strip()
-            if stripped and self._is_heading_line(stripped, llm_heading_lines):
+            if stripped and is_heading(stripped):
                 headings.append(stripped)
             if len(headings) >= max_items:
                 break
@@ -208,9 +214,14 @@ class DocumentRepository:
 
     def _build_structured_chunks(self, domain: str, doc_id: str, text: str, max_chars: int) -> list[StructuredChunk]:
         """按标题/条款优先的策略构建结构化 chunks。"""
+        ref = self.resolve(domain=domain, doc_id=doc_id)
+        if ref.path.suffix.lower() == ".pdf" and text.lstrip().startswith("#"):
+            chunks = self._build_markdown_chunks(doc_id=doc_id, markdown_text=text, max_chars=max_chars)
+            if chunks:
+                return chunks
+
         normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
         lines = [line.strip() for line in normalized.splitlines()]
-        llm_heading_lines = self._get_llm_heading_lines(domain=domain, doc_id=doc_id, text=normalized)
         blocks: list[tuple[str, list[str]]] = []
         current_title = doc_id
         current_lines: list[str] = []
@@ -220,7 +231,7 @@ class DocumentRepository:
                 if current_lines and current_lines[-1] != "":
                     current_lines.append("")
                 continue
-            if self._is_heading_line(line, llm_heading_lines):
+            if is_heading(line):
                 if current_lines:
                     blocks.append((current_title, current_lines))
                     current_lines = []
@@ -285,25 +296,48 @@ class DocumentRepository:
             )
         return chunks
 
-    def _get_llm_heading_lines(self, domain: str, doc_id: str, text: str) -> set[str]:
-        if self._heading_detector is None:
-            return set()
-        cache_key = (domain, doc_id)
-        cached = self._heading_line_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        lines = [line.strip() for line in text.splitlines() if line.strip() and not is_heading(line)]
-        detected = self._heading_detector.classify_candidates(doc_id=doc_id, lines=lines)
-        self._heading_line_cache[cache_key] = detected
-        return detected
-
-    def _is_heading_line(self, line: str, llm_heading_lines: set[str]) -> bool:
-        stripped = line.strip()
-        if not stripped:
-            return False
-        if is_heading(stripped):
-            return True
-        return stripped in llm_heading_lines
+    def _build_markdown_chunks(self, doc_id: str, markdown_text: str, max_chars: int) -> list[StructuredChunk]:
+        sections = split_markdown_by_headers(markdown_text)
+        chunks: list[StructuredChunk] = []
+        order = 0
+        for section in sections:
+            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", section.content) if p.strip()]
+            if not paragraphs:
+                continue
+            buffer: list[str] = []
+            buffer_len = 0
+            for para in paragraphs:
+                para_len = len(para) + (2 if buffer else 0)
+                if buffer and buffer_len + para_len > max_chars:
+                    content = "\n\n".join(buffer).strip()
+                    chunks.append(
+                        StructuredChunk(
+                            doc_id=doc_id,
+                            title=section.title[:120] or doc_id,
+                            content=content,
+                            chunk_id=f"{doc_id}::chunk{order}",
+                            order=order,
+                        )
+                    )
+                    order += 1
+                    buffer = [para]
+                    buffer_len = len(para)
+                else:
+                    buffer.append(para)
+                    buffer_len += para_len
+            if buffer:
+                content = "\n\n".join(buffer).strip()
+                chunks.append(
+                    StructuredChunk(
+                        doc_id=doc_id,
+                        title=section.title[:120] or doc_id,
+                        content=content,
+                        chunk_id=f"{doc_id}::chunk{order}",
+                        order=order,
+                    )
+                )
+                order += 1
+        return chunks
 
     def _read_document(self, path: Path) -> str:
         """按文件类型读取文档并返回文本。"""
@@ -314,7 +348,7 @@ class DocumentRepository:
             html = path.read_text(encoding="utf-8", errors="ignore")
             return self._strip_html(html)
         if suffix == ".pdf":
-            return self._extract_pdf_text(path)
+            return self._extract_pdf_markdown(path)
         raise ValueError(f"不支持的文档类型：{path}")
 
     def _strip_html(self, html: str) -> str:
@@ -326,8 +360,17 @@ class DocumentRepository:
         html = re.sub(r"\n{2,}", "\n\n", html)
         return html.strip()
 
-    def _extract_pdf_text(self, path: Path) -> str:
-        """从 PDF 提取文本（可选依赖 pypdf 或 PyPDF2）。"""
+    def _extract_pdf_markdown(self, path: Path) -> str:
+        """优先使用 MinerU 将 PDF 转为 Markdown，失败时回退到纯文本抽取。"""
+        if self._markdown_converter is not None:
+            try:
+                return self._markdown_converter.convert_pdf_to_markdown(path)
+            except Exception as exc:
+                logger.warning("MinerU 转 Markdown 失败，回退纯文本：%s %s", path, repr(exc))
+        return self._extract_pdf_text_fallback(path)
+
+    def _extract_pdf_text_fallback(self, path: Path) -> str:
+        """PDF 纯文本回退抽取（仅在 MinerU 不可用时使用）。"""
         try:
             from pypdf import PdfReader
         except Exception:
@@ -335,8 +378,8 @@ class DocumentRepository:
                 from PyPDF2 import PdfReader
             except Exception as exc:
                 raise RuntimeError(
-                    "PDF 文本抽取需要安装 pypdf 或 PyPDF2。"
-                    "建议：pip install pypdf"
+                    "PDF 解析需要安装 MinerU，或安装 pypdf / PyPDF2 作为回退。"
+                    "建议：pip install mineru langchain-text-splitters"
                 ) from exc
 
         reader = PdfReader(str(path))

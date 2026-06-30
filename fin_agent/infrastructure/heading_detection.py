@@ -1,115 +1,121 @@
 from __future__ import annotations
 
-import json
 import logging
-import re
-
-from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage, OpenAiCompatibleChatClient
+import tempfile
+from fin_agent.compat import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-class LlmHeadingDetector:
-    """使用 LLM 对疑似标题行做批量补判。"""
-
-    def __init__(self, client: OpenAiCompatibleChatClient, batch_size: int = 40) -> None:
-        self._client = client
-        self._batch_size = max(1, batch_size)
-
-    def classify_candidates(self, doc_id: str, lines: list[str]) -> set[str]:
-        candidates = [line for line in _deduplicate_preserve_order(lines) if is_potential_heading_candidate(line)]
-        if not candidates:
-            return set()
-
-        matched: set[str] = set()
-        for start in range(0, len(candidates), self._batch_size):
-            batch = candidates[start : start + self._batch_size]
-            try:
-                matched.update(self._classify_batch(doc_id=doc_id, lines=batch))
-            except Exception as exc:
-                logger.warning("LLM heading 判定失败：doc_id=%s error=%s", doc_id, repr(exc))
-        return matched
-
-    def _classify_batch(self, doc_id: str, lines: list[str]) -> set[str]:
-        numbered_lines = "\n".join(f"{idx + 1}. {line}" for idx, line in enumerate(lines))
-        messages = [
-            ChatMessage(
-                role="system",
-                content=(
-                    "你是金融文档结构识别器。"
-                    "请判断给定行是否应该被视为文档标题、章节名、小节名、条款名、表格标题或结构性小标题。"
-                    "必须保留原文，不得改写。只输出 JSON。"
-                ),
-            ),
-            ChatMessage(
-                role="user",
-                content=(
-                    f"文档ID：{doc_id}\n\n"
-                    "请从下列文本行中挑出应视为 heading 的行，输出 JSON：\n"
-                    '{\n  "headings": ["原文行1", "原文行2"]\n}\n\n'
-                    "判断标准：\n"
-                    "- heading 通常是标题、章节名、条款起始、目录项、表格名、附录名、定义项。\n"
-                    "- 简短概括性短语更可能是 heading。\n"
-                    "- 完整叙述句、长说明句、普通正文一般不是 heading。\n"
-                    "- 必须返回完全一致的原文行，不能返回编号。\n\n"
-                    f"待判断文本行：\n{numbered_lines}"
-                ),
-            ),
-        ]
-        response = self._client.chat(messages)
-        payload = _extract_json_payload(response.content)
-        headings = payload.get("headings") if isinstance(payload, dict) else None
-        if not isinstance(headings, list):
-            return set()
-        source = set(lines)
-        return {str(item).strip() for item in headings if str(item).strip() in source}
+@dataclass(frozen=True, slots=True)
+class MarkdownSection:
+    title: str
+    content: str
+    metadata: dict[str, str]
 
 
-def is_potential_heading_candidate(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped:
-        return False
-    if len(stripped) < 2 or len(stripped) > 60:
-        return False
-    if stripped.endswith(("。", "；", ";", "！", "？", ":", "：")):
-        return False
-    if stripped.count("，") >= 2 or stripped.count(",") >= 2:
-        return False
-    if re.search(r"[。！？!?；;]", stripped):
-        return False
-    if re.fullmatch(r"[\W_]+", stripped):
-        return False
-    return True
+class MineruMarkdownConverter:
+    """使用 MinerU 将 PDF 转为 Markdown。"""
+
+    def convert_pdf_to_markdown(self, pdf_path: Path) -> str:
+        do_parse, read_fn = _import_mineru()
+        pdf_bytes = read_fn(pdf_path)
+        with tempfile.TemporaryDirectory(prefix="mineru_md_") as temp_dir:
+            output_dir = Path(temp_dir)
+            do_parse(
+                output_dir=str(output_dir),
+                pdf_file_names=[pdf_path.stem],
+                pdf_bytes_list=[pdf_bytes],
+                p_lang_list=["ch"],
+                backend="pipeline",
+                parse_method="auto",
+                formula_enable=True,
+                table_enable=True,
+                start_page_id=0,
+                end_page_id=None,
+            )
+            md_path = _find_markdown_output(output_dir=output_dir, stem=pdf_path.stem)
+            if md_path is None:
+                raise RuntimeError(f"MinerU 未产出 Markdown：{pdf_path}")
+            return md_path.read_text(encoding="utf-8", errors="ignore")
 
 
-def _deduplicate_preserve_order(lines: list[str]) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped in seen:
+def split_markdown_by_headers(markdown_text: str) -> list[MarkdownSection]:
+    MarkdownHeaderTextSplitter = _import_markdown_splitter()
+    splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=[
+            ("#", "h1"),
+            ("##", "h2"),
+            ("###", "h3"),
+            ("####", "h4"),
+            ("#####", "h5"),
+            ("######", "h6"),
+        ],
+        strip_headers=False,
+    )
+    documents = splitter.split_text(markdown_text or "")
+    sections: list[MarkdownSection] = []
+    for doc in documents:
+        content = (getattr(doc, "page_content", "") or "").strip()
+        metadata = {str(k): str(v) for k, v in (getattr(doc, "metadata", {}) or {}).items()}
+        title = _build_section_title(metadata=metadata, content=content)
+        if not content:
             continue
-        seen.add(stripped)
-        ordered.append(stripped)
-    return ordered
+        sections.append(MarkdownSection(title=title, content=content, metadata=metadata))
+    return sections
 
 
-def _extract_json_payload(text: str) -> dict | None:
-    content = (text or "").strip()
-    if not content:
-        return None
+def extract_markdown_headings(markdown_text: str, max_items: int) -> list[str]:
+    headings: list[str] = []
+    for raw_line in (markdown_text or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("#"):
+            headings.append(line)
+        if len(headings) >= max_items:
+            break
+    return headings
+
+
+def _build_section_title(metadata: dict[str, str], content: str) -> str:
+    header_values = [metadata.get(f"h{i}", "").strip() for i in range(1, 7)]
+    header_values = [item for item in header_values if item]
+    if header_values:
+        return " / ".join(header_values)[:120]
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("#"):
+            return stripped[:120]
+    return "markdown_section"
+
+
+def _find_markdown_output(output_dir: Path, stem: str) -> Path | None:
+    preferred = list(output_dir.glob(f"**/{stem}.md"))
+    if preferred:
+        return preferred[0]
+    candidates = list(output_dir.glob("**/*.md"))
+    return candidates[0] if candidates else None
+
+
+def _import_mineru():
     try:
-        payload = json.loads(content)
-        return payload if isinstance(payload, dict) else None
-    except Exception:
-        pass
+        from mineru.cli.common import do_parse, read_fn
+    except Exception as exc:
+        raise RuntimeError(
+            "需要安装 MinerU 才能将 PDF 转为 Markdown。建议安装：pip install mineru"
+        ) from exc
+    return do_parse, read_fn
 
-    match = re.search(r"\{[\s\S]*\}", content)
-    if not match:
-        return None
+
+def _import_markdown_splitter():
     try:
-        payload = json.loads(match.group(0))
-        return payload if isinstance(payload, dict) else None
+        from langchain_text_splitters import MarkdownHeaderTextSplitter
+        return MarkdownHeaderTextSplitter
     except Exception:
-        return None
-
+        try:
+            from langchain.text_splitter import MarkdownHeaderTextSplitter
+            return MarkdownHeaderTextSplitter
+        except Exception as exc:
+            raise RuntimeError(
+                "需要安装 LangChain Markdown 标题切分器。建议安装：pip install langchain-text-splitters"
+            ) from exc
