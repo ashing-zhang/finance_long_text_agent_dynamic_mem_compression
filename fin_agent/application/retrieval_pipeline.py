@@ -215,7 +215,7 @@ def retrieve_round(
                     )
                 )
             per_tuple.sort(key=lambda item: item.score, reverse=True)
-            results.extend(per_tuple)
+            results.extend(per_tuple[: retrieval.per_doc_top_k])
 
     return results
 
