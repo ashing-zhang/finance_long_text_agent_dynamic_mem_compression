@@ -18,6 +18,7 @@ from fin_agent.application.tracing import (
     RetrievalTrace,
     summarize_evidence_hits,
     summarize_hits_by_option_doc,
+    summarize_hits_by_option_doc_flat,
 )
 from fin_agent.domain.models import EvidenceSnippet, Question, RetrievalConfig
 from fin_agent.infrastructure.data_access import DocumentRepository
@@ -105,7 +106,12 @@ def retrieve_evidence(
                 query_mode=("planned" if round_index == 0 else "relaxed"),
                 option_queries=dict(option_queries),
                 hit_count=len(current_hits),
-                top_hits=summarize_evidence_hits(current_hits, limit=8),
+                top_hits=summarize_hits_by_option_doc_flat(
+                    items=current_hits,
+                    option_keys=sorted(option_queries.keys()),
+                    doc_ids=doc_ids,
+                    per_doc_limit=retrieval.per_doc_top_k,
+                ),
                 option_doc_hits=summarize_hits_by_option_doc(
                     items=current_hits,
                     option_keys=sorted(option_queries.keys()),

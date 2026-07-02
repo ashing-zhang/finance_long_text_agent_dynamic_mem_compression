@@ -105,3 +105,23 @@ def summarize_hits_by_option_doc(
             }
         grouped[option_key] = option_group
     return grouped
+
+
+def summarize_hits_by_option_doc_flat(
+    items: list[EvidenceSnippet],
+    option_keys: list[str],
+    doc_ids: list[str],
+    per_doc_limit: int,
+) -> list[dict[str, object]]:
+    flattened: list[dict[str, object]] = []
+    for option_key in option_keys:
+        for doc_id in doc_ids:
+            matched = [
+                item
+                for item in items
+                if item.option_key == option_key and item.doc_id == doc_id
+            ]
+            if not matched:
+                continue
+            flattened.extend(summarize_evidence_hits(matched, limit=per_doc_limit))
+    return flattened
