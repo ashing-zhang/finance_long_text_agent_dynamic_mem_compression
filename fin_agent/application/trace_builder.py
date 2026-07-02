@@ -45,6 +45,7 @@ def build_question_trace(
                 "option_queries": item.option_queries,
                 "hit_count": item.hit_count,
                 "top_hits": item.top_hits,
+                "option_doc_hits": item.option_doc_hits,
             }
             for item in retrieval_trace.rounds
         ],
@@ -70,4 +71,3 @@ def build_question_trace(
         search_trace=search_trace,
         answer_trace=answer_trace,
     )
-

@@ -19,6 +19,7 @@ class RetrievalRoundTrace:
     option_queries: dict[str, str]
     hit_count: int
     top_hits: list[dict[str, object]]
+    option_doc_hits: dict[str, dict[str, dict[str, object]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,3 +83,25 @@ def summarize_evidence_hits(items: list[EvidenceSnippet], limit: int) -> list[di
         for item in items[:limit]
     ]
 
+
+def summarize_hits_by_option_doc(
+    items: list[EvidenceSnippet],
+    option_keys: list[str],
+    doc_ids: list[str],
+    preview_limit: int = 5,
+) -> dict[str, dict[str, dict[str, object]]]:
+    grouped: dict[str, dict[str, dict[str, object]]] = {}
+    for option_key in option_keys:
+        option_group: dict[str, dict[str, object]] = {}
+        for doc_id in doc_ids:
+            matched = [
+                item
+                for item in items
+                if item.option_key == option_key and item.doc_id == doc_id
+            ]
+            option_group[doc_id] = {
+                "hit_count": len(matched),
+                "hits_preview": summarize_evidence_hits(matched, limit=preview_limit),
+            }
+        grouped[option_key] = option_group
+    return grouped

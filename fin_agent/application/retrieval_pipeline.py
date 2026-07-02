@@ -13,7 +13,12 @@ from fin_agent.application.retrieval import (
     extract_query_features,
     focus_chunk_content,
 )
-from fin_agent.application.tracing import RetrievalRoundTrace, RetrievalTrace, summarize_evidence_hits
+from fin_agent.application.tracing import (
+    RetrievalRoundTrace,
+    RetrievalTrace,
+    summarize_evidence_hits,
+    summarize_hits_by_option_doc,
+)
 from fin_agent.domain.models import EvidenceSnippet, Question, RetrievalConfig
 from fin_agent.infrastructure.data_access import DocumentRepository
 
@@ -101,6 +106,11 @@ def retrieve_evidence(
                 option_queries=dict(option_queries),
                 hit_count=len(current_hits),
                 top_hits=summarize_evidence_hits(current_hits, limit=8),
+                option_doc_hits=summarize_hits_by_option_doc(
+                    items=current_hits,
+                    option_keys=sorted(option_queries.keys()),
+                    doc_ids=doc_ids,
+                ),
             )
         )
         for hit in current_hits:
@@ -158,7 +168,6 @@ def retrieve_round(
 
             ranking_texts = [chunk.to_index_text() for chunk in chunks]
             rankings = bm25_rank(query=option_query, chunks=ranking_texts)
-            per_doc_hits = 0
             for index, base_score in rankings:
                 chunk = chunks[index]
                 boosted = base_score + compute_symbolic_boost(
@@ -190,9 +199,6 @@ def retrieve_round(
                         option_key=option_key,
                     )
                 )
-                per_doc_hits += 1
-                if per_doc_hits >= retrieval.per_doc_top_k:
-                    break
 
     results.sort(key=lambda item: item.score, reverse=True)
     return results
