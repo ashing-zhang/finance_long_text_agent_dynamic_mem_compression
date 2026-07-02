@@ -157,7 +157,6 @@ def retrieve_round(
     for option_key, option_query in option_queries.items():
         option_feature = option_features.get(option_key) or extract_query_features(option_query)
 
-        all_chunks: list = []
         for doc_id in doc_ids:
             chunks = cached_chunks.get(doc_id)
             if chunks is None:
@@ -172,47 +171,46 @@ def retrieve_round(
                     cached_chunks[doc_id] = []
                     continue
                 cached_chunks[doc_id] = chunks
-            if chunks:
-                all_chunks.extend(chunks)
+            if not chunks:
+                continue
 
-        if not all_chunks:
-            continue
-
-        ranking_texts = [chunk.to_index_text() for chunk in all_chunks]
-        rankings = bm25_rank(query=option_query, chunks=ranking_texts)
-        for index, base_score in rankings:
-            chunk = all_chunks[index]
-            boosted = base_score + compute_symbolic_boost(
-                text=chunk.content,
-                title=chunk.title,
-                features=option_feature,
-                domain=q.domain,
-            )
-            boosted += compute_domain_specific_boost(
-                domain=q.domain,
-                option_text=q.options[option_key],
-                doc_id=chunk.doc_id,
-                title=chunk.title,
-                text=chunk.content,
-                features=option_feature,
-            )
-            focused_content = focus_chunk_content(
-                domain=q.domain,
-                option_text=q.options[option_key],
-                text=chunk.content,
-            )
-            results.append(
-                EvidenceSnippet(
+            per_tuple: list[EvidenceSnippet] = []
+            ranking_texts = [chunk.to_index_text() for chunk in chunks]
+            rankings = bm25_rank(query=option_query, chunks=ranking_texts)
+            for index, base_score in rankings:
+                chunk = chunks[index]
+                boosted = base_score + compute_symbolic_boost(
+                    text=chunk.content,
+                    title=chunk.title,
+                    features=option_feature,
+                    domain=q.domain,
+                )
+                boosted += compute_domain_specific_boost(
+                    domain=q.domain,
+                    option_text=q.options[option_key],
                     doc_id=chunk.doc_id,
                     title=chunk.title,
-                    content=focused_content,
-                    score=float(boosted),
-                    chunk_id=chunk.chunk_id,
-                    option_key=option_key,
+                    text=chunk.content,
+                    features=option_feature,
                 )
-            )
+                focused_content = focus_chunk_content(
+                    domain=q.domain,
+                    option_text=q.options[option_key],
+                    text=chunk.content,
+                )
+                per_tuple.append(
+                    EvidenceSnippet(
+                        doc_id=chunk.doc_id,
+                        title=chunk.title,
+                        content=focused_content,
+                        score=float(boosted),
+                        chunk_id=chunk.chunk_id,
+                        option_key=option_key,
+                    )
+                )
+            per_tuple.sort(key=lambda item: item.score, reverse=True)
+            results.extend(per_tuple)
 
-    results.sort(key=lambda item: item.score, reverse=True)
     return results
 
 
@@ -278,23 +276,35 @@ def select_coverage_preserving_evidence(
     option_key_set = set(option_keys)
     selected: list[EvidenceSnippet] = []
     selected_keys: set[tuple[str | None, str]] = set()
-    coverage_counter: dict[tuple[str, str], int] = {}
 
+    grouped: dict[tuple[str, str], list[EvidenceSnippet]] = {}
+    leftovers: list[EvidenceSnippet] = []
     for item in evidence:
         if item.option_key is None:
+            leftovers.append(item)
             continue
         if item.option_key not in option_key_set or item.doc_id not in doc_id_set:
+            leftovers.append(item)
             continue
-        coverage_key = (item.option_key, item.doc_id)
-        used = coverage_counter.get(coverage_key, 0)
-        if used >= per_doc_top_k:
-            continue
-        selected.append(item)
-        selected_keys.add((item.option_key, item.chunk_id))
-        coverage_counter[coverage_key] = used + 1
+        grouped.setdefault((item.option_key, item.doc_id), []).append(item)
+
+    for option_key in option_keys:
+        for doc_id in doc_ids:
+            items = grouped.get((option_key, doc_id))
+            if not items:
+                continue
+            items.sort(key=lambda item: item.score, reverse=True)
+            for item in items[:per_doc_top_k]:
+                item_key = (item.option_key, item.chunk_id)
+                if item_key in selected_keys:
+                    continue
+                selected.append(item)
+                selected_keys.add(item_key)
 
     target_size = max(soft_limit, len(selected))
-    for item in evidence:
+    remaining = [item for item in evidence if (item.option_key, item.chunk_id) not in selected_keys]
+    remaining.sort(key=lambda item: item.score, reverse=True)
+    for item in remaining:
         item_key = (item.option_key, item.chunk_id)
         if item_key in selected_keys:
             continue
