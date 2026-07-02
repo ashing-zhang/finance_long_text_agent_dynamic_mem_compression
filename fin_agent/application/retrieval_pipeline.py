@@ -153,52 +153,64 @@ def retrieve_round(
     option_features: dict[str, QueryFeatures],
 ) -> list[EvidenceSnippet]:
     results: list[EvidenceSnippet] = []
+    cached_chunks: dict[str, list] = {}
     for option_key, option_query in option_queries.items():
         option_feature = option_features.get(option_key) or extract_query_features(option_query)
-        for doc_id in doc_ids:
-            try:
-                chunks = docs.load_chunks(
-                    domain=q.domain,
-                    doc_id=doc_id,
-                    max_chars=adjust_chunk_size(domain=q.domain, base_size=retrieval.chunk_max_chars),
-                )
-            except Exception as exc:
-                logger.warning("chunk 加载失败：%s/%s %s", q.domain, doc_id, repr(exc))
-                continue
 
-            ranking_texts = [chunk.to_index_text() for chunk in chunks]
-            rankings = bm25_rank(query=option_query, chunks=ranking_texts)
-            for index, base_score in rankings:
-                chunk = chunks[index]
-                boosted = base_score + compute_symbolic_boost(
-                    text=chunk.content,
-                    title=chunk.title,
-                    features=option_feature,
-                    domain=q.domain,
-                )
-                boosted += compute_domain_specific_boost(
-                    domain=q.domain,
-                    option_text=q.options[option_key],
+        all_chunks: list = []
+        for doc_id in doc_ids:
+            chunks = cached_chunks.get(doc_id)
+            if chunks is None:
+                try:
+                    chunks = docs.load_chunks(
+                        domain=q.domain,
+                        doc_id=doc_id,
+                        max_chars=adjust_chunk_size(domain=q.domain, base_size=retrieval.chunk_max_chars),
+                    )
+                except Exception as exc:
+                    logger.warning("chunk 加载失败：%s/%s %s", q.domain, doc_id, repr(exc))
+                    cached_chunks[doc_id] = []
+                    continue
+                cached_chunks[doc_id] = chunks
+            if chunks:
+                all_chunks.extend(chunks)
+
+        if not all_chunks:
+            continue
+
+        ranking_texts = [chunk.to_index_text() for chunk in all_chunks]
+        rankings = bm25_rank(query=option_query, chunks=ranking_texts)
+        for index, base_score in rankings:
+            chunk = all_chunks[index]
+            boosted = base_score + compute_symbolic_boost(
+                text=chunk.content,
+                title=chunk.title,
+                features=option_feature,
+                domain=q.domain,
+            )
+            boosted += compute_domain_specific_boost(
+                domain=q.domain,
+                option_text=q.options[option_key],
+                doc_id=chunk.doc_id,
+                title=chunk.title,
+                text=chunk.content,
+                features=option_feature,
+            )
+            focused_content = focus_chunk_content(
+                domain=q.domain,
+                option_text=q.options[option_key],
+                text=chunk.content,
+            )
+            results.append(
+                EvidenceSnippet(
                     doc_id=chunk.doc_id,
                     title=chunk.title,
-                    text=chunk.content,
-                    features=option_feature,
+                    content=focused_content,
+                    score=float(boosted),
+                    chunk_id=chunk.chunk_id,
+                    option_key=option_key,
                 )
-                focused_content = focus_chunk_content(
-                    domain=q.domain,
-                    option_text=q.options[option_key],
-                    text=chunk.content,
-                )
-                results.append(
-                    EvidenceSnippet(
-                        doc_id=chunk.doc_id,
-                        title=chunk.title,
-                        content=focused_content,
-                        score=float(boosted),
-                        chunk_id=chunk.chunk_id,
-                        option_key=option_key,
-                    )
-                )
+            )
 
     results.sort(key=lambda item: item.score, reverse=True)
     return results
