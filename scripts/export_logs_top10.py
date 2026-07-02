@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+"""
+运行指南（模块化）：
+
+1) 默认导出
+   - python -m scripts.export_logs_top10
+   - 输入：outputs/logs.csv
+   - 输出：outputs/logs_top10.json
+   - 行数：10
+
+2) 指定输入/输出与导出行数
+   - python -m scripts.export_logs_top10 --input outputs/logs.csv --output outputs/logs_top50.json --limit 50
+
+说明：
+- 该脚本会读取 logs.csv 的前 N 行并写入 JSON；
+- 以 *_json 结尾的列会尝试按 JSON 解析（解析失败则保留原字符串）。
+"""
+
 import argparse
 import csv
 import json

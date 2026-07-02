@@ -80,7 +80,7 @@ def retrieve_evidence(
     doc_ids: list[str],
     plan: RetrievalPlan,
 ) -> tuple[list[EvidenceSnippet], RetrievalTrace]:
-    merged: dict[str, EvidenceSnippet] = {}
+    merged: dict[tuple[str | None, str], EvidenceSnippet] = {}
     relaxed_queries = build_relaxed_queries(q=q, plan=plan)
     round_traces: list[RetrievalRoundTrace] = []
 
@@ -104,9 +104,10 @@ def retrieve_evidence(
             )
         )
         for hit in current_hits:
-            existing = merged.get(hit.chunk_id)
+            merge_key = (hit.option_key, hit.chunk_id)
+            existing = merged.get(merge_key)
             if existing is None or hit.score > existing.score:
-                merged[hit.chunk_id] = hit
+                merged[merge_key] = hit
         if merged:
             break
 
@@ -114,11 +115,17 @@ def retrieve_evidence(
     if not merged:
         fallback = build_fallback_evidence(docs=docs, retrieval=retrieval, q=q, doc_ids=doc_ids)
         for hit in fallback:
-            merged[hit.chunk_id] = hit
+            merged[(hit.option_key, hit.chunk_id)] = hit
         used_fallback = True
 
     evidence = sorted(merged.values(), key=lambda item: item.score, reverse=True)
-    limited = evidence[: retrieval.top_k_chunks]
+    limited = select_coverage_preserving_evidence(
+        evidence=evidence,
+        doc_ids=doc_ids,
+        option_keys=sorted(plan.option_queries.keys()),
+        per_doc_top_k=retrieval.per_doc_top_k,
+        soft_limit=retrieval.top_k_chunks,
+    )
     retrieval_trace = RetrievalTrace(
         candidate_doc_ids=list(doc_ids),
         rounds=round_traces,
@@ -188,16 +195,7 @@ def retrieve_round(
                     break
 
     results.sort(key=lambda item: item.score, reverse=True)
-    limited: list[EvidenceSnippet] = []
-    per_option_counter: dict[str, int] = {}
-    for item in results:
-        option_key = item.option_key or "_"
-        used = per_option_counter.get(option_key, 0)
-        if used >= retrieval.per_option_top_k:
-            continue
-        per_option_counter[option_key] = used + 1
-        limited.append(item)
-    return limited
+    return results
 
 
 def build_fallback_evidence(
@@ -246,3 +244,44 @@ def build_fallback_evidence(
             )
     return fallback
 
+
+def select_coverage_preserving_evidence(
+    evidence: list[EvidenceSnippet],
+    doc_ids: list[str],
+    option_keys: list[str],
+    per_doc_top_k: int,
+    soft_limit: int,
+) -> list[EvidenceSnippet]:
+    """优先保留每个选项在每个候选文档中的 top n 证据，再补充高分证据。"""
+    if not evidence:
+        return []
+
+    doc_id_set = set(doc_ids)
+    option_key_set = set(option_keys)
+    selected: list[EvidenceSnippet] = []
+    selected_keys: set[tuple[str | None, str]] = set()
+    coverage_counter: dict[tuple[str, str], int] = {}
+
+    for item in evidence:
+        if item.option_key is None:
+            continue
+        if item.option_key not in option_key_set or item.doc_id not in doc_id_set:
+            continue
+        coverage_key = (item.option_key, item.doc_id)
+        used = coverage_counter.get(coverage_key, 0)
+        if used >= per_doc_top_k:
+            continue
+        selected.append(item)
+        selected_keys.add((item.option_key, item.chunk_id))
+        coverage_counter[coverage_key] = used + 1
+
+    target_size = max(soft_limit, len(selected))
+    for item in evidence:
+        item_key = (item.option_key, item.chunk_id)
+        if item_key in selected_keys:
+            continue
+        selected.append(item)
+        selected_keys.add(item_key)
+        if len(selected) >= target_size:
+            break
+    return selected
