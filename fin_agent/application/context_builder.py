@@ -4,13 +4,64 @@ import logging
 
 from fin_agent.application.domain_specialists import build_domain_supplement
 from fin_agent.application.planner import RetrievalPlan
-from fin_agent.application.retrieval import DOMAIN_PROMPT_HINTS, build_grouped_context, trim_grouped_context
+from fin_agent.application.retrieval import DOMAIN_PROMPT_HINTS
 from fin_agent.application.tracing import zero_token_usage
 from fin_agent.domain.models import EvidenceSnippet, Question, RetrievalConfig, TokenUsage
 from fin_agent.infrastructure.data_access import DocumentRepository
 from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage, OpenAiCompatibleChatClient
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_inline_text(text: str) -> str:
+    """将文本压缩为单行，避免上下文膨胀。"""
+    return " ".join((text or "").split()).strip()
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    """截断文本到指定长度。"""
+    normalized = _normalize_inline_text(text)
+    if max_chars <= 0:
+        return ""
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max(0, max_chars - 15)].rstrip() + " ...(truncated)"
+
+
+def build_option_doc_coverage_context(
+    q: Question,
+    doc_ids: list[str],
+    evidence: list[EvidenceSnippet],
+    per_hit_max_chars: int,
+    option_text_max_chars: int | None,
+) -> str:
+    """构造按 option×doc 覆盖展示的证据链上下文。"""
+    sections: list[str] = []
+    for option_key in sorted(q.options.keys()):
+        option_text = q.options[option_key]
+        if option_text_max_chars is not None:
+            option_text = _truncate(option_text, max_chars=option_text_max_chars)
+
+        sections.append(f"## 选项 {option_key}")
+        sections.append(f"候选陈述：{option_text}")
+        for doc_id in doc_ids:
+            sections.append(f"### DocID: {doc_id}")
+            matched = [
+                item
+                for item in evidence
+                if item.option_key == option_key and item.doc_id == doc_id
+            ]
+            if not matched:
+                sections.append("None")
+                continue
+            matched.sort(key=lambda item: item.score, reverse=True)
+            item = matched[0]
+            preview = _truncate(item.content, max_chars=per_hit_max_chars)
+            sections.append(
+                f"- [DocID: {item.doc_id} | Title: {item.title} | Score: {item.score:.3f}] {preview}"
+            )
+        sections.append("")
+    return "\n".join(sections).strip()
 
 
 def build_context(
@@ -22,34 +73,46 @@ def build_context(
     doc_ids: list[str],
     evidence: list[EvidenceSnippet],
 ) -> tuple[str, TokenUsage]:
-    context = build_grouped_context(
-        q=q,
-        doc_ids=doc_ids,
-        evidence=evidence,
-        docs=docs,
-    )
     supplement = build_domain_supplement(q=q, doc_ids=doc_ids, docs=docs, evidence=evidence)
+    per_hit_max_chars = min(360, int(retrieval.chunk_max_chars))
+    option_text_max_chars: int | None = None
+
+    def build_main() -> str:
+        return build_option_doc_coverage_context(
+            q=q,
+            doc_ids=doc_ids,
+            evidence=evidence,
+            per_hit_max_chars=per_hit_max_chars,
+            option_text_max_chars=option_text_max_chars,
+        )
+
+    main_context = build_main()
     if supplement is not None and supplement.content:
-        context = f"{context}\n\n## {supplement.title}\n{supplement.content}".strip()
-    if len(context) <= retrieval.max_context_chars:
-        return context, zero_token_usage()
+        full_context = f"{main_context}\n\n## {supplement.title}\n{supplement.content}".strip()
+    else:
+        full_context = main_context
 
-    if len(context) > retrieval.refine_context_chars:
-        refined, usage = refine_context_with_llm(llm=llm, q=q, context=context)
-        if refined:
-            refined = trim_grouped_context(
-                query=plan.global_query,
-                text=refined,
-                max_chars=retrieval.max_context_chars,
-            )
-            return refined, usage
+    if len(full_context) <= retrieval.max_context_chars:
+        return full_context, zero_token_usage()
 
-    compressed = trim_grouped_context(
-        query=plan.global_query,
-        text=context,
-        max_chars=retrieval.max_context_chars,
-    )
-    return compressed, zero_token_usage()
+    if supplement is not None and supplement.content and len(main_context) <= retrieval.max_context_chars:
+        return main_context, zero_token_usage()
+
+    for _ in range(12):
+        if per_hit_max_chars > 90:
+            per_hit_max_chars = max(90, per_hit_max_chars - 60)
+        elif option_text_max_chars is None:
+            option_text_max_chars = 240
+        elif option_text_max_chars > 120:
+            option_text_max_chars = max(120, option_text_max_chars - 40)
+        else:
+            break
+
+        main_context = build_main()
+        if len(main_context) <= retrieval.max_context_chars:
+            return main_context, zero_token_usage()
+
+    return main_context[: retrieval.max_context_chars], zero_token_usage()
 
 
 def refine_context_with_llm(
@@ -87,4 +150,3 @@ def refine_context_with_llm(
     except Exception as exc:
         logger.warning("上下文精筛失败：qid=%s error=%s", q.qid, repr(exc))
         return "", zero_token_usage()
-
