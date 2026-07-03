@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def maybe_parse_json(value: str) -> object:
+    """尝试把字符串解析为 JSON 对象。"""
     if value is None:
         return None
     text = value.strip()
@@ -64,7 +65,38 @@ def maybe_parse_json(value: str) -> object:
         return value
 
 
+def prune_search_trace(trace: object) -> object:
+    """移除导出 JSON 中体积较大的检索明细字段。"""
+    if not isinstance(trace, dict):
+        return trace
+    retrieval_rounds = trace.get("retrieval_rounds")
+    if not isinstance(retrieval_rounds, list):
+        return trace
+
+    compact_rounds: list[object] = []
+    for item in retrieval_rounds:
+        if not isinstance(item, dict):
+            compact_rounds.append(item)
+            continue
+        compact_round = dict(item)
+        compact_round.pop("top_hits", None)
+        compact_round.pop("option_doc_hits", None)
+        compact_rounds.append(compact_round)
+
+    compact_trace = dict(trace)
+    compact_trace["retrieval_rounds"] = compact_rounds
+    return compact_trace
+
+
+def normalize_export_row(row: dict[str, object]) -> dict[str, object]:
+    """按导出需求清理单条日志记录。"""
+    normalized = dict(row)
+    normalized["search_trace_json"] = prune_search_trace(normalized.get("search_trace_json"))
+    return normalized
+
+
 def load_rows(path: Path, limit: int) -> list[dict[str, object]]:
+    """读取 CSV 并转换为适合导出的结构。"""
     if limit < 0:
         raise ValueError("--limit must be >= 0")
     if not path.exists():
@@ -82,11 +114,12 @@ def load_rows(path: Path, limit: int) -> list[dict[str, object]]:
                     parsed_row[key] = maybe_parse_json(value or "")
                 else:
                     parsed_row[key] = value or ""
-            rows.append(parsed_row)
+            rows.append(normalize_export_row(parsed_row))
     return rows
 
 
 def write_json(path: Path, rows: list[dict[str, object]]) -> None:
+    """把导出结果写入 JSON 文件。"""
     payload = {
         "count": len(rows),
         "records": rows,

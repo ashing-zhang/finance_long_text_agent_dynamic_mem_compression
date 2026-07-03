@@ -8,6 +8,11 @@ from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage
 from fin_agent.application.tracing import QuestionTrace, RetrievalTrace
 
 
+def serialize_messages(messages: list[ChatMessage]) -> list[dict[str, str]]:
+    """将发送给 LLM 的完整 message 列表转换为可序列化结构。"""
+    return [{"role": message.role, "content": message.content} for message in messages]
+
+
 def build_question_trace(
     q: Question,
     plan: RetrievalPlan,
@@ -54,7 +59,7 @@ def build_question_trace(
     answer_trace = {
         "context_chars": len(context),
         "context_preview": truncate_text(context, max_chars=1500),
-        "messages": [{"role": m.role, "content": truncate_text(m.content, max_chars=4000)} for m in messages],
+        "messages": serialize_messages(messages),
         "feature_usage": token_usage_to_dict(feature_usage),
         "refine_usage": token_usage_to_dict(refine_usage),
         "answer_usage": token_usage_to_dict(answer_usage),
