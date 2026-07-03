@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fin_agent.application.planner import RetrievalPlan
 from fin_agent.application.retrieval import DOMAIN_PROMPT_HINTS
-from fin_agent.application.tracing import summarize_evidence_hits, token_usage_to_dict, truncate_text
+from fin_agent.application.tracing import summarize_evidence_hits, token_usage_to_dict
 from fin_agent.domain.models import EvidenceSnippet, Question, TokenUsage
 from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage
 from fin_agent.application.tracing import QuestionTrace, RetrievalTrace
@@ -49,8 +49,6 @@ def build_question_trace(
                 "query_mode": item.query_mode,
                 "option_queries": item.option_queries,
                 "hit_count": item.hit_count,
-                "top_hits": item.top_hits,
-                "option_doc_hits": item.option_doc_hits,
             }
             for item in retrieval_trace.rounds
         ],
@@ -58,7 +56,6 @@ def build_question_trace(
     }
     answer_trace = {
         "context_chars": len(context),
-        "context_preview": truncate_text(context, max_chars=1500),
         "messages": serialize_messages(messages),
         "feature_usage": token_usage_to_dict(feature_usage),
         "refine_usage": token_usage_to_dict(refine_usage),
