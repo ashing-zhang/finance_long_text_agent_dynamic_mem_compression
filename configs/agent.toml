@@ -26,5 +26,5 @@ coarse_doc_window_chars = 2400
 refine_context_chars = 12000
 max_context_chars = 9000
 max_routing_rounds = 2
-enable_domain_supplement = true
-truncate_hit_content_for_context = true
+enable_domain_supplement = false
+truncate_hit_content_for_context = false
