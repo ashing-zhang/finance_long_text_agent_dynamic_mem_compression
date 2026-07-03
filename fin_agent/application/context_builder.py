@@ -28,11 +28,19 @@ def _truncate(text: str, max_chars: int) -> str:
     return normalized[: max(0, max_chars - 15)].rstrip() + " ...(truncated)"
 
 
+def format_hit_content(text: str, max_chars: int, truncate: bool) -> str:
+    """按配置决定命中文本是否需要截断。"""
+    if truncate:
+        return _truncate(text, max_chars=max_chars)
+    return _normalize_inline_text(text)
+
+
 def build_option_doc_coverage_context(
     q: Question,
     doc_ids: list[str],
     evidence: list[EvidenceSnippet],
     per_hit_max_chars: int,
+    truncate_hit_content: bool,
     option_text_max_chars: int | None,
 ) -> str:
     """构造按 option×doc 覆盖展示的证据链上下文。"""
@@ -56,7 +64,11 @@ def build_option_doc_coverage_context(
                 continue
             matched.sort(key=lambda item: item.score, reverse=True)
             item = matched[0]
-            preview = _truncate(item.content, max_chars=per_hit_max_chars)
+            preview = format_hit_content(
+                text=item.content,
+                max_chars=per_hit_max_chars,
+                truncate=truncate_hit_content,
+            )
             sections.append(
                 f"- [DocID: {item.doc_id} | Title: {item.title} | Score: {item.score:.3f}] {preview}"
             )
@@ -73,8 +85,10 @@ def build_context(
     doc_ids: list[str],
     evidence: list[EvidenceSnippet],
 ) -> tuple[str, TokenUsage]:
-    supplement = build_domain_supplement(q=q, doc_ids=doc_ids, docs=docs, evidence=evidence)
-    per_hit_max_chars = min(360, int(retrieval.chunk_max_chars))
+    supplement = None
+    if retrieval.enable_domain_supplement:
+        supplement = build_domain_supplement(q=q, doc_ids=doc_ids, docs=docs, evidence=evidence)
+    per_hit_max_chars = max(1, min(int(retrieval.per_hit_max_chars), int(retrieval.chunk_max_chars)))
     option_text_max_chars: int | None = None
 
     def build_main() -> str:
@@ -83,6 +97,7 @@ def build_context(
             doc_ids=doc_ids,
             evidence=evidence,
             per_hit_max_chars=per_hit_max_chars,
+            truncate_hit_content=retrieval.truncate_hit_content_for_context,
             option_text_max_chars=option_text_max_chars,
         )
 
@@ -99,7 +114,7 @@ def build_context(
         return main_context, zero_token_usage()
 
     for _ in range(12):
-        if per_hit_max_chars > 90:
+        if retrieval.truncate_hit_content_for_context and per_hit_max_chars > 90:
             per_hit_max_chars = max(90, per_hit_max_chars - 60)
         elif option_text_max_chars is None:
             option_text_max_chars = 240

@@ -40,6 +40,21 @@ class AppConfig:
     log_level: str = "INFO"
 
 
+def read_bool(value: object, default: bool) -> bool:
+    """将配置值稳妥转换为布尔值。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    return bool(value)
+
+
 def main() -> None:
     """模块化入口。"""
     load_dotenv(Path(os.getenv("FIN_AGENT_DOTENV", ".env")))
@@ -81,6 +96,7 @@ def load_app_config(path: Path) -> AppConfig:
     max_retries = int(data.get("llm", {}).get("max_retries", 2))
 
     chunk_max_chars = int(data.get("retrieval", {}).get("chunk_max_chars", 1600))
+    per_hit_max_chars = int(data.get("retrieval", {}).get("per_hit_max_chars", 360))
     doc_top_k = int(data.get("retrieval", {}).get("doc_top_k", 3))
     per_doc_top_k = int(data.get("retrieval", {}).get("per_doc_top_k", 3))
     per_option_top_k = int(data.get("retrieval", {}).get("per_option_top_k", 5))
@@ -89,6 +105,14 @@ def load_app_config(path: Path) -> AppConfig:
     refine_context_chars = int(data.get("retrieval", {}).get("refine_context_chars", 12000))
     max_context_chars = int(data.get("retrieval", {}).get("max_context_chars", 9000))
     max_routing_rounds = int(data.get("retrieval", {}).get("max_routing_rounds", 2))
+    enable_domain_supplement = read_bool(
+        data.get("retrieval", {}).get("enable_domain_supplement", True),
+        default=True,
+    )
+    truncate_hit_content_for_context = read_bool(
+        data.get("retrieval", {}).get("truncate_hit_content_for_context", True),
+        default=True,
+    )
 
     log_level = str(data.get("log_level", "INFO"))
 
@@ -109,6 +133,7 @@ def load_app_config(path: Path) -> AppConfig:
     )
     retrieval = RetrievalConfig(
         chunk_max_chars=chunk_max_chars,
+        per_hit_max_chars=per_hit_max_chars,
         doc_top_k=doc_top_k,
         per_doc_top_k=per_doc_top_k,
         per_option_top_k=per_option_top_k,
@@ -117,6 +142,8 @@ def load_app_config(path: Path) -> AppConfig:
         refine_context_chars=refine_context_chars,
         max_context_chars=max_context_chars,
         max_routing_rounds=max_routing_rounds,
+        enable_domain_supplement=enable_domain_supplement,
+        truncate_hit_content_for_context=truncate_hit_content_for_context,
     )
     return AppConfig(run=run, llm=llm, retrieval=retrieval, log_level=log_level)
 

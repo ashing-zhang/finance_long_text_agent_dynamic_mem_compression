@@ -79,6 +79,7 @@ class RetrievalConfig:
     """检索与压缩相关配置。"""
 
     chunk_max_chars: int = 1600
+    per_hit_max_chars: int = 360
     doc_top_k: int = 3
     per_doc_top_k: int = 3
     per_option_top_k: int = 5
@@ -87,6 +88,8 @@ class RetrievalConfig:
     refine_context_chars: int = 12000
     max_context_chars: int = 9000
     max_routing_rounds: int = 2
+    enable_domain_supplement: bool = True
+    truncate_hit_content_for_context: bool = True
 
 
 @dataclass(frozen=True, slots=True)
