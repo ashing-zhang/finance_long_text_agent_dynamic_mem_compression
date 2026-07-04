@@ -25,6 +25,49 @@ HEADING_PATTERNS = (
 )
 
 
+def split_oversized_paragraph(text: str, max_chars: int) -> list[str]:
+    """将超长段落切分为不超过 max_chars 的多个片段。"""
+    normalized = (text or "").strip()
+    if not normalized:
+        return []
+    if max_chars <= 0 or len(normalized) <= max_chars:
+        return [normalized]
+
+    sentence_candidates = [
+        part.strip()
+        for part in re.split(r"(?<=[。！？!?；;])\s*", normalized)
+        if part and part.strip()
+    ]
+    if len(sentence_candidates) <= 1:
+        sentence_candidates = [normalized[i : i + max_chars].strip() for i in range(0, len(normalized), max_chars)]
+        return [part for part in sentence_candidates if part]
+
+    pieces: list[str] = []
+    buffer = ""
+    for sentence in sentence_candidates:
+        if len(sentence) > max_chars:
+            if buffer:
+                pieces.append(buffer)
+                buffer = ""
+            for i in range(0, len(sentence), max_chars):
+                chunk = sentence[i : i + max_chars].strip()
+                if chunk:
+                    pieces.append(chunk)
+            continue
+
+        joined = f"{buffer} {sentence}".strip() if buffer else sentence
+        if len(joined) <= max_chars:
+            buffer = joined
+            continue
+        if buffer:
+            pieces.append(buffer)
+        buffer = sentence
+
+    if buffer:
+        pieces.append(buffer)
+    return pieces
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentRef:
     """文档引用：domain + doc_id -> file path。"""
@@ -280,7 +323,10 @@ class DocumentRepository:
         chunks: list[StructuredChunk] = []
         order = 0
         for title, block_lines in blocks:
-            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", "\n".join(block_lines)) if p.strip()]
+            raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", "\n".join(block_lines)) if p.strip()]
+            paragraphs: list[str] = []
+            for paragraph in raw_paragraphs:
+                paragraphs.extend(split_oversized_paragraph(paragraph, max_chars=max_chars))
             if not paragraphs:
                 continue
 
@@ -335,7 +381,10 @@ class DocumentRepository:
         chunks: list[StructuredChunk] = []
         order = 0
         for section in sections:
-            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", section.content) if p.strip()]
+            raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", section.content) if p.strip()]
+            paragraphs: list[str] = []
+            for paragraph in raw_paragraphs:
+                paragraphs.extend(split_oversized_paragraph(paragraph, max_chars=max_chars))
             if not paragraphs:
                 continue
             buffer: list[str] = []
