@@ -45,6 +45,17 @@ def build_option_doc_coverage_context(
 ) -> str:
     """构造按 option×doc 覆盖展示的证据链上下文。"""
     sections: list[str] = []
+    doc_no_map = {doc_id: idx for idx, doc_id in enumerate(doc_ids, start=1)}
+
+    sections.append("## 文档索引")
+    for doc_id in doc_ids:
+        doc_no = doc_no_map.get(doc_id)
+        if doc_no is None:
+            sections.append(f"- 文档：{doc_id}")
+        else:
+            sections.append(f"- 第{doc_no}份文档：{doc_id}（文档 {doc_id}）")
+    sections.append("")
+
     for option_key in sorted(q.options.keys()):
         option_text = q.options[option_key]
         if option_text_max_chars is not None:
@@ -53,7 +64,11 @@ def build_option_doc_coverage_context(
         sections.append(f"## 选项 {option_key}")
         sections.append(f"候选陈述：{option_text}")
         for doc_id in doc_ids:
-            sections.append(f"### DocID: {doc_id}")
+            doc_no = doc_no_map.get(doc_id)
+            if doc_no is None:
+                sections.append(f"### DocID: {doc_id}")
+            else:
+                sections.append(f"### 第{doc_no}份文档 | DocID: {doc_id}")
             matched = [
                 item
                 for item in evidence
@@ -63,15 +78,20 @@ def build_option_doc_coverage_context(
                 sections.append("None")
                 continue
             matched.sort(key=lambda item: item.score, reverse=True)
-            item = matched[0]
-            preview = format_hit_content(
-                text=item.content,
-                max_chars=per_hit_max_chars,
-                truncate=truncate_hit_content,
-            )
-            sections.append(
-                f"- [DocID: {item.doc_id} | Title: {item.title} | Score: {item.score:.3f}] {preview}"
-            )
+            for item in matched:
+                preview = format_hit_content(
+                    text=item.content,
+                    max_chars=per_hit_max_chars,
+                    truncate=truncate_hit_content,
+                )
+                if doc_no is None:
+                    sections.append(
+                        f"- [DocID: {item.doc_id} | Chunk: {item.chunk_id} | Title: {item.title} | Score: {item.score:.3f}] {preview}"
+                    )
+                else:
+                    sections.append(
+                        f"- [DocNo: {doc_no} | DocID: {item.doc_id} | Chunk: {item.chunk_id} | Title: {item.title} | Score: {item.score:.3f}] {preview}"
+                    )
         sections.append("")
     return "\n".join(sections).strip()
 
