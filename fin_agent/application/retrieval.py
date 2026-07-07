@@ -55,7 +55,7 @@ class QueryFeatures:
     years: tuple[str, ...]
     numbers: tuple[str, ...]
     clauses: tuple[str, ...]
-    keywords: tuple[str, ...]
+    features: tuple[str, ...]
 
 
 def extract_query_features(text: str) -> QueryFeatures:
@@ -72,8 +72,8 @@ def extract_query_features(text: str) -> QueryFeatures:
         )
     )
     clauses = tuple(sorted(set(re.findall(r"第[一二三四五六七八九十百千万0-9]+[条章节款]", normalized))))
-    keywords = tuple(sorted(set(extract_keywords(normalized))))
-    return QueryFeatures(years=years, numbers=numbers, clauses=clauses, keywords=keywords)
+    features = tuple(sorted(set(extract_keywords(normalized))))
+    return QueryFeatures(years=years, numbers=numbers, clauses=clauses, features=features)
 
 
 def extract_keywords(text: str) -> list[str]:
@@ -300,8 +300,8 @@ def compute_symbolic_boost(text: str, title: str, features: QueryFeatures, domai
     for clause in features.clauses:
         if clause and (clause in normalized_text or clause in normalized_title):
             score += 0.8
-    for keyword in features.keywords[:12]:
-        if keyword and (keyword in normalized_title or keyword in normalized_text):
+    for feature in features.features[:12]:
+        if feature and (feature in normalized_title or feature in normalized_text):
             score += 0.1
     for synonyms in DOMAIN_SYNONYMS.get(domain, {}).values():
         for term in synonyms:

@@ -21,14 +21,14 @@ def serialize_retrieval_plan(plan: RetrievalPlan) -> dict[str, object]:
             "years": list(plan.features.years),
             "numbers": list(plan.features.numbers),
             "clauses": list(plan.features.clauses),
-            "keywords": list(plan.features.keywords),
+            "features": list(plan.features.features),
         },
         "option_features": {
             option_key: {
                 "years": list(features.years),
                 "numbers": list(features.numbers),
                 "clauses": list(features.clauses),
-                "keywords": list(features.keywords),
+                "features": list(features.features),
             }
             for option_key, features in sorted(plan.option_features.items())
         },
@@ -58,7 +58,7 @@ def build_question_trace(
             "years": list(plan.features.years),
             "numbers": list(plan.features.numbers),
             "clauses": list(plan.features.clauses),
-            "keywords": list(plan.features.keywords),
+            "features": list(plan.features.features),
         },
         "domain_hint": DOMAIN_PROMPT_HINTS.get(q.domain, ""),
         "candidate_doc_ids": list(doc_ids),

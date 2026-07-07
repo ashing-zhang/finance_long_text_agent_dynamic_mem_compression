@@ -13,6 +13,8 @@ from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage, O
 
 logger = logging.getLogger(__name__)
 
+FEATURE_PROMPT_VERSION = "v2_open"
+
 
 @dataclass(frozen=True, slots=True)
 class RetrievalPlan:
@@ -77,6 +79,7 @@ def extract_plan_features_with_llm(
 ) -> tuple[QueryFeatures, dict[str, QueryFeatures], TokenUsage]:
     cache_key = json.dumps(
         {
+            "prompt_version": FEATURE_PROMPT_VERSION,
             "domain": domain,
             "global_query": global_query,
             "option_queries": {k: option_queries[k] for k in sorted(option_queries.keys())},
@@ -92,8 +95,9 @@ def extract_plan_features_with_llm(
         ChatMessage(
             role="system",
             content=(
-                "你是信息抽取器，负责从查询文本中提取检索特征。"
-                "你必须严格从输入文本中抽取“原文子串”，不得改写、不得引入外部知识。"
+                "你是金融检索特征生成器，负责把问题与每个选项转成“更容易命中原文证据”的检索特征。"
+                "你可以利用推理与常识做适度改写与扩展（例如同义表达、字段别名、常见表述模板），以提升召回率。"
+                "不要引入与问题无关的实体或事实，不要猜测文档里不存在的具体数值。"
                 "只输出 JSON，不要输出任何解释。"
             ),
         ),
@@ -103,16 +107,23 @@ def extract_plan_features_with_llm(
                 f"领域：{domain}\n\n"
                 "请对以下查询文本抽取特征，输出 JSON，格式如下：\n"
                 "{\n"
-                '  "global": {"years": [], "numbers": [], "clauses": [], "keywords": []},\n'
+                '  "global": {"years": [], "numbers": [], "clauses": [], "features": []},\n'
                 '  "options": {\n'
-                '    "A": {"years": [], "numbers": [], "clauses": [], "keywords": []}\n'
+                '    "A": {"years": [], "numbers": [], "clauses": [], "features": []}\n'
                 "  }\n"
                 "}\n\n"
                 "抽取要求：\n"
-                "- years：仅保留 4 位年份（如 2024、2025），必须在原文出现。\n"
-                "- numbers：保留带单位的数值原文子串（如 6.5亿元、75%、30天、1个月），必须在原文出现。\n"
-                "- clauses：保留条款编号原文子串（如 第四十七条、第3章），必须在原文出现。\n"
-                "- keywords：保留 6~18 个能区分检索的关键词/术语，必须在原文出现；优先保留金融专有名词、主体、评级、产品名、条款名；避免整句。\n"
+                "- years：仅保留 4 位年份（如 2024、2025）；如果文本中没有年份可为空。\n"
+                "- numbers：优先保留带单位的数值短串（如 6.5亿元、75%、30天、1个月）；如果没有可为空；不要编造新数值。\n"
+                "- clauses：条款编号或章节定位（如 第四十七条、第3章、第一条定义及解释）；可以生成常见定位短语来辅助检索。\n"
+                "- features：每个对象输出 6~18 个“检索特征”，可以是单词、短语或短句（不超过 25 字）；允许同义/别名/字段名扩展，例如：\n"
+                "  - 发行主体/发行人/发行人名称/发行主体名称\n"
+                "  - 发行规模/发行金额/发行总额/本次债券总额/募集资金规模/不超过X亿元\n"
+                "  - 主体信用评级/主体信用等级/信用评级结果/AAA\n"
+                "  - 受托管理人/债券受托管理人/受托管理协议/受托管理机构\n"
+                "  - 若出现具体机构名（公司/证券/评级机构），可补充简称或常见别写。\n"
+                "- global.features：放“全局能区分检索的领域要素与主题词”。\n"
+                "- options.<key>.features：放“只对该选项成立/不成立最关键的字段线索”，尽量贴近能在文档中出现的表述。\n"
                 "- 对英文/缩写请保持原样（例如 AAA）。\n"
                 "- 去重后输出。\n\n"
                 f"global_query:\n{global_query}\n\n"
@@ -142,18 +153,19 @@ def extract_plan_features_with_llm(
 
 def parse_features_payload(payload: object) -> QueryFeatures:
     if not isinstance(payload, dict):
-        return QueryFeatures(years=(), numbers=(), clauses=(), keywords=())
+        return QueryFeatures(years=(), numbers=(), clauses=(), features=())
 
     years_raw = payload.get("years")
     numbers_raw = payload.get("numbers")
     clauses_raw = payload.get("clauses")
-    keywords_raw = payload.get("keywords")
+    features_raw = payload.get("features")
+    if features_raw is None:
+        features_raw = payload.get("keywords")
 
     years = tuple(sorted({str(x).strip() for x in (years_raw if isinstance(years_raw, list) else []) if str(x).strip()}))
     years = tuple(y for y in years if re.fullmatch(r"(?:19|20)\d{2}", y))
 
     numbers = tuple(sorted({str(x).strip() for x in (numbers_raw if isinstance(numbers_raw, list) else []) if str(x).strip()}))
     clauses = tuple(sorted({str(x).strip() for x in (clauses_raw if isinstance(clauses_raw, list) else []) if str(x).strip()}))
-    keywords = tuple(sorted({str(x).strip() for x in (keywords_raw if isinstance(keywords_raw, list) else []) if str(x).strip()}))
-    return QueryFeatures(years=years, numbers=numbers, clauses=clauses, keywords=keywords)
-
+    features = tuple(sorted({str(x).strip() for x in (features_raw if isinstance(features_raw, list) else []) if str(x).strip()}))
+    return QueryFeatures(years=years, numbers=numbers, clauses=clauses, features=features)
