@@ -26,6 +26,16 @@ from fin_agent.infrastructure.data_access import DocumentRepository
 logger = logging.getLogger(__name__)
 
 
+def build_bm25_query(option_query: str, features: QueryFeatures) -> str:
+    terms: list[str] = []
+    terms.extend([item for item in features.keywords[:12] if item])
+    terms.extend([item for item in features.years if item])
+    terms.extend([item for item in features.numbers if item])
+    terms.extend([item for item in features.clauses if item])
+    compact = " ".join(terms).strip()
+    return compact or option_query
+
+
 def build_relaxed_queries(q: Question, plan: RetrievalPlan) -> dict[str, str]:
     relaxed: dict[str, str] = {}
     feature_terms = list(plan.features.years) + list(plan.features.numbers) + list(plan.features.clauses)
@@ -92,19 +102,27 @@ def retrieve_evidence(
 
     for round_index in range(retrieval.max_routing_rounds):
         option_queries = plan.option_queries if round_index == 0 else relaxed_queries
+        bm25_queries = {
+            option_key: build_bm25_query(
+                option_query=option_query,
+                features=(plan.option_features.get(option_key) or extract_query_features(option_query)),
+            )
+            for option_key, option_query in option_queries.items()
+        }
         current_hits = retrieve_round(
             docs=docs,
             retrieval=retrieval,
             q=q,
             doc_ids=doc_ids,
             option_queries=option_queries,
+            bm25_queries=bm25_queries,
             option_features=plan.option_features,
         )
         round_traces.append(
             RetrievalRoundTrace(
                 round_index=round_index + 1,
                 query_mode=("planned" if round_index == 0 else "relaxed"),
-                option_queries=dict(option_queries),
+                option_queries=dict(bm25_queries),
                 hit_count=len(current_hits),
                 top_hits=summarize_hits_by_option_doc_flat(
                     items=current_hits,
@@ -156,12 +174,14 @@ def retrieve_round(
     q: Question,
     doc_ids: list[str],
     option_queries: dict[str, str],
+    bm25_queries: dict[str, str],
     option_features: dict[str, QueryFeatures],
 ) -> list[EvidenceSnippet]:
     results: list[EvidenceSnippet] = []
     cached_chunks: dict[str, list] = {}
     for option_key, option_query in option_queries.items():
         option_feature = option_features.get(option_key) or extract_query_features(option_query)
+        bm25_query = bm25_queries.get(option_key) or build_bm25_query(option_query=option_query, features=option_feature)
 
         for doc_id in doc_ids:
             chunks = cached_chunks.get(doc_id)
@@ -182,7 +202,7 @@ def retrieve_round(
 
             per_tuple: list[EvidenceSnippet] = []
             ranking_texts = [chunk.to_index_text() for chunk in chunks]
-            rankings = bm25_rank(query=option_query, chunks=ranking_texts)
+            rankings = bm25_rank(query=bm25_query, chunks=ranking_texts)
             for index, base_score in rankings:
                 chunk = chunks[index]
                 boosted = base_score + compute_symbolic_boost(
