@@ -13,6 +13,28 @@ def serialize_messages(messages: list[ChatMessage]) -> list[dict[str, str]]:
     return [{"role": message.role, "content": message.content} for message in messages]
 
 
+def serialize_retrieval_plan(plan: RetrievalPlan) -> dict[str, object]:
+    return {
+        "global_query": plan.global_query,
+        "option_queries": dict(plan.option_queries),
+        "features": {
+            "years": list(plan.features.years),
+            "numbers": list(plan.features.numbers),
+            "clauses": list(plan.features.clauses),
+            "keywords": list(plan.features.keywords),
+        },
+        "option_features": {
+            option_key: {
+                "years": list(features.years),
+                "numbers": list(features.numbers),
+                "clauses": list(features.clauses),
+                "keywords": list(features.keywords),
+            }
+            for option_key, features in sorted(plan.option_features.items())
+        },
+    }
+
+
 def build_question_trace(
     q: Question,
     plan: RetrievalPlan,
@@ -29,6 +51,7 @@ def build_question_trace(
     feature_usage: TokenUsage,
 ) -> QuestionTrace:
     thought_trace = {
+        "retrieval_plan": serialize_retrieval_plan(plan),
         "global_query": plan.global_query,
         "option_queries": dict(plan.option_queries),
         "query_features": {

@@ -16,8 +16,8 @@ timeout_seconds = 120.0
 max_retries = 2
 
 [retrieval]
-chunk_max_chars = 100
-per_hit_max_chars = 100
+chunk_max_chars = 200
+per_hit_max_chars = 200
 doc_top_k = 3
 per_doc_top_k = 3
 per_option_top_k = 5

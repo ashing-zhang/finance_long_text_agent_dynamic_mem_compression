@@ -92,6 +92,17 @@ def normalize_export_row(row: dict[str, object]) -> dict[str, object]:
     """按导出需求清理单条日志记录。"""
     normalized = dict(row)
     normalized["search_trace_json"] = prune_search_trace(normalized.get("search_trace_json"))
+    thought = normalized.get("thought_trace_json")
+    if isinstance(thought, dict):
+        plan = thought.get("retrieval_plan")
+        if not isinstance(plan, dict):
+            plan = {
+                "global_query": thought.get("global_query", ""),
+                "option_queries": thought.get("option_queries", {}),
+                "features": thought.get("query_features", {}),
+                "option_features": {},
+            }
+        normalized["retrieval_plan_json"] = plan
     return normalized
 
 
