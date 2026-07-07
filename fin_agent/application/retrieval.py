@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
 import math
+import os
 import re
+from functools import lru_cache
 from fin_agent.compat import dataclass
 
 from fin_agent.domain.models import EvidenceSnippet, Question
 from fin_agent.infrastructure.data_access import DocumentRepository
+
+logger = logging.getLogger(__name__)
 
 DOMAIN_SYNONYMS: dict[str, dict[str, list[str]]] = {
     "insurance": {
@@ -161,15 +166,79 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def tokenize(text: str) -> list[str]:
-    normalized = normalize_text(text).lower()
+def _read_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@lru_cache(maxsize=1)
+def _load_qwen_tokenizer():
+    model_name = os.getenv("FIN_AGENT_TOKENIZER_MODEL", "Qwen/Qwen3-0.6B")
+    if os.getenv("FIN_AGENT_TOKENIZER_BACKEND", "qwen").strip().lower() != "qwen":
+        return None
+    try:
+        from transformers import AutoTokenizer
+    except Exception as exc:
+        logger.warning("未安装 transformers，回退到正则分词：error=%s", repr(exc))
+        return None
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=_read_bool_env("FIN_AGENT_TOKENIZER_TRUST_REMOTE_CODE", True),
+            local_files_only=_read_bool_env("FIN_AGENT_TOKENIZER_LOCAL_ONLY", False),
+        )
+        logger.info("已启用 Qwen tokenizer：model=%s", model_name)
+        return tokenizer
+    except Exception as exc:
+        logger.warning("加载 Qwen tokenizer 失败，回退到正则分词：model=%s error=%s", model_name, repr(exc))
+        return None
+
+
+@lru_cache(maxsize=8192)
+def _tokenize_with_qwen(normalized_text: str) -> tuple[str, ...]:
+    if not normalized_text:
+        return ()
+    tokenizer = _load_qwen_tokenizer()
+    if tokenizer is None:
+        return ()
+    try:
+        input_ids = tokenizer(normalized_text, add_special_tokens=False).input_ids
+    except Exception as exc:
+        logger.warning("Qwen tokenizer 分词失败，回退到正则分词：error=%s", repr(exc))
+        return ()
+
     tokens: list[str] = []
-    for part in re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", normalized):
+    for token_id in input_ids:
+        cleaned = tokenizer.decode([token_id], clean_up_tokenization_spaces=False).strip().lower()
+        if not cleaned:
+            continue
+        if cleaned.startswith("<|") and cleaned.endswith("|>"):
+            continue
+        if re.fullmatch(r"[\W_]+", cleaned, flags=re.UNICODE):
+            continue
+        tokens.append(cleaned)
+    return tuple(tokens)
+
+
+def _tokenize_by_regex(normalized_text: str) -> list[str]:
+    lowered = normalized_text.lower()
+    tokens: list[str] = []
+    for part in re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", lowered):
         if re.fullmatch(r"[\u4e00-\u9fff]+", part):
             tokens.extend(list(part))
         else:
             tokens.append(part)
     return tokens
+
+
+def tokenize(text: str) -> list[str]:
+    normalized = normalize_text(text)
+    qwen_tokens = list(_tokenize_with_qwen(normalized))
+    if qwen_tokens:
+        return qwen_tokens
+    return _tokenize_by_regex(normalized)
 
 
 def bm25_rank(query: str, chunks: list[str]) -> list[tuple[int, float]]:
@@ -443,4 +512,3 @@ def extract_focus_sentences(text: str, terms: list[str], max_sentences: int, max
         selected.append(sentence)
         total += len(sentence) + 1
     return "\n".join(selected).strip()
-
