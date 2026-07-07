@@ -13,7 +13,7 @@ from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage, O
 
 logger = logging.getLogger(__name__)
 
-FEATURE_PROMPT_VERSION = "v4_term_first"
+FEATURE_PROMPT_VERSION = "v5_key_only_limited"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +98,7 @@ def extract_plan_features_with_llm(
                 "你是金融检索特征生成器，负责把问题与每个选项转成“更容易命中原文证据”的检索特征。"
                 "你可以利用推理与常识做适度改写与扩展（例如同义表达、字段别名、常见表述模板），以提升召回率。"
                 "不要引入与问题无关的实体或事实，不要猜测文档里不存在的具体数值。"
-                "重要：options 中每个选项都必须产出非空 features（至少 6 条）；即使不确定文档具体写法，也要给出字段名与常见表述模板作为检索特征，禁止输出空数组。"
+                "重要：options 中每个选项都必须产出非空 features。"
                 "只输出 JSON，不要输出任何解释。"
             ),
         ),
@@ -117,24 +117,18 @@ def extract_plan_features_with_llm(
                 "- years：仅保留 4 位年份（如 2024、2025）；如果文本中没有年份可为空。\n"
                 "- numbers：优先保留带单位的数值短串（如 6.5亿元、75%、30天、1个月）；如果没有可为空；不要编造新数值。\n"
                 "- clauses：条款编号或章节定位（如 第四十七条、第3章、第一条定义及解释）；可以生成常见定位短语来辅助检索。\n"
-                "- features：每个对象输出 6~18 个“检索特征”，优先输出实体或字段名（名词/术语），不要输出整句；每条建议不超过 12 字。\n"
-                "  - 每个选项必须至少包含 2~4 条“核心字段名/实体词”特征，例如：\n"
+                "- features：每个对象输出 3~6 个“检索键（key）”，必须是字段名/术语（名词），不要输出整句。\n"
+                "  - 必须只抽取 key，不要抽取 value：例如“发行人名称为广东省广晟控股集团有限公司”，features 只输出“发行人/发行主体/发行人名称”，不要输出“广东省广晟控股集团有限公司”。\n"
+                "  - 不要把多个词用“/”合并在同一条里；一条 features 只能是一个 key。\n"
+                "  - 每条建议不超过 12 字。\n"
+                "  - 金融合同常见 key 示例：\n"
                 "    - 发行人 / 发行主体 / 发行人名称\n"
                 "    - 发行规模 / 发行金额 / 发行总额 / 上限\n"
-                "    - 主体信用评级 / 主体信用等级 / AAA\n"
+                "    - 主体信用评级 / 主体信用等级 / 信用评级结果\n"
                 "    - 受托管理人 / 债券受托管理人 / 受托管理机构\n"
-                "  - 在核心字段名之后，再补充同义表述、常见栏目名、常见写法模板（短语级），例如：\n"
-                "  - 发行主体/发行人/发行人名称/发行主体名称\n"
-                "  - 发行规模/发行金额/发行总额/本次债券总额/募集资金规模/不超过X亿元\n"
-                "  - 主体信用评级/主体信用等级/信用评级结果/AAA\n"
-                "  - 受托管理人/债券受托管理人/受托管理协议/受托管理机构\n"
-                "  - 若出现具体机构名（公司/证券/评级机构），可补充简称或常见别写。\n"
                 "- global.features：放“全局能区分检索的领域要素与主题词”。\n"
                 "- options.<key>.features：放“只对该选项成立/不成立最关键的字段线索”，尽量贴近能在文档中出现的表述。\n"
-                "- 你必须为每个选项 A/B/C/D 输出非空 features（>= 6 条）；如果原文中没有可直接复制的短语，请输出字段名 + 常见写法模板，例如：\n"
-                "  - 发行金额/发行规模/上限\n"
-                "  - 主体信用评级/AAA\n"
-                "  - 受托管理人/受托管理机构\n"
+                "- 你必须为每个选项 A/B/C/D 输出非空 features（至少 3 条）。\n"
                 "- 对英文/缩写请保持原样（例如 AAA）。\n"
                 "- 去重后输出。\n\n"
                 f"global_query:\n{global_query}\n\n"
@@ -146,12 +140,12 @@ def extract_plan_features_with_llm(
     try:
         resp = llm.chat(messages)
         payload = extract_json_payload(resp.content)
-        global_features = parse_features_payload(payload.get("global") if isinstance(payload, dict) else None)
+        global_features = parse_features_payload(payload.get("global") if isinstance(payload, dict) else None, max_features=12)
         option_features: dict[str, QueryFeatures] = {}
         options_payload = payload.get("options") if isinstance(payload, dict) else None
         for key in sorted(option_queries.keys()):
             item = options_payload.get(key) if isinstance(options_payload, dict) else None
-            option_features[key] = parse_features_payload(item)
+            option_features[key] = parse_features_payload(item, max_features=6)
         query_feature_cache[cache_key] = (global_features, dict(option_features))
         return global_features, option_features, resp.usage
     except Exception as exc:
@@ -162,7 +156,22 @@ def extract_plan_features_with_llm(
         return global_features, option_features, zero_token_usage()
 
 
-def parse_features_payload(payload: object) -> QueryFeatures:
+def _normalize_feature_key(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    for sep in ("：", ":", "为"):
+        if sep in raw:
+            raw = raw.split(sep, 1)[0].strip()
+    if "/" in raw:
+        raw = raw.split("/", 1)[0].strip()
+    raw = re.sub(r"\s+", " ", raw).strip()
+    if len(raw) > 24:
+        raw = raw[:24].strip()
+    return raw
+
+
+def parse_features_payload(payload: object, max_features: int) -> QueryFeatures:
     if not isinstance(payload, dict):
         return QueryFeatures(years=(), numbers=(), clauses=(), features=())
 
@@ -178,5 +187,14 @@ def parse_features_payload(payload: object) -> QueryFeatures:
 
     numbers = tuple(sorted({str(x).strip() for x in (numbers_raw if isinstance(numbers_raw, list) else []) if str(x).strip()}))
     clauses = tuple(sorted({str(x).strip() for x in (clauses_raw if isinstance(clauses_raw, list) else []) if str(x).strip()}))
-    features = tuple(sorted({str(x).strip() for x in (features_raw if isinstance(features_raw, list) else []) if str(x).strip()}))
-    return QueryFeatures(years=years, numbers=numbers, clauses=clauses, features=features)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in (features_raw if isinstance(features_raw, list) else []):
+        key = _normalize_feature_key(str(item))
+        if not key or key in seen:
+            continue
+        cleaned.append(key)
+        seen.add(key)
+        if len(cleaned) >= max(1, int(max_features)):
+            break
+    return QueryFeatures(years=years, numbers=numbers, clauses=clauses, features=tuple(cleaned))
