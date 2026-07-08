@@ -21,7 +21,7 @@ def format_user_prompt(q: Question, context: str) -> str:
     format_hint = {
         AnswerFormat.MCQ: "最终答案必须是一个大写字母。",
         AnswerFormat.TF: "最终答案必须是一个大写字母（A 或 B）。",
-        AnswerFormat.MULTI: "最终答案必须是按字母排序且去重后的多个大写字母。",
+        AnswerFormat.MULTI: "最终答案必须是按字母排序且去重后的一个或多个大写字母。",
     }[q.answer_format]
     domain_instruction = build_domain_reasoning_instruction(q.domain)
     return (
