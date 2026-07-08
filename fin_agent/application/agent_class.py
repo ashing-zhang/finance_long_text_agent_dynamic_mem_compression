@@ -4,6 +4,7 @@ import logging
 
 from fin_agent.application.answer_postprocess import normalize_answer
 from fin_agent.application.context_builder import build_context
+from fin_agent.application.agentic_rag import run_agentic_rag
 from fin_agent.application.planner import build_retrieval_plan
 from fin_agent.application.prompt_builder import build_messages
 from fin_agent.application.retrieval_pipeline import retrieve_evidence, select_candidate_docs
@@ -42,16 +43,33 @@ class FinanceLongTextAgent:
             q=q,
         )
         doc_ids = select_candidate_docs(docs=self._docs, retrieval=self._retrieval, q=q, plan=plan)
-        evidence, retrieval_trace = retrieve_evidence(docs=self._docs, retrieval=self._retrieval, q=q, doc_ids=doc_ids, plan=plan)
-        context, refine_usage = build_context(
-            llm=self._llm,
-            docs=self._docs,
-            retrieval=self._retrieval,
-            q=q,
-            plan=plan,
-            doc_ids=doc_ids,
-            evidence=evidence,
-        )
+        agentic_trace = None
+        if self._retrieval.enable_agentic_rag:
+            plan, evidence, retrieval_trace, context, refine_usage, agentic_trace = run_agentic_rag(
+                llm=self._llm,
+                docs=self._docs,
+                retrieval=self._retrieval,
+                q=q,
+                plan=plan,
+                doc_ids=doc_ids,
+            )
+        else:
+            evidence, retrieval_trace = retrieve_evidence(
+                docs=self._docs,
+                retrieval=self._retrieval,
+                q=q,
+                doc_ids=doc_ids,
+                plan=plan,
+            )
+            context, refine_usage = build_context(
+                llm=self._llm,
+                docs=self._docs,
+                retrieval=self._retrieval,
+                q=q,
+                plan=plan,
+                doc_ids=doc_ids,
+                evidence=evidence,
+            )
 
         messages = build_messages(q=q, context=context)
         resp = self._llm.chat(messages)
@@ -66,6 +84,7 @@ class FinanceLongTextAgent:
             evidence=evidence,
             context=context,
             refine_usage=refine_usage,
+            agentic_trace=agentic_trace,
             messages=messages,
             model_output=resp.content,
             answer=answer,

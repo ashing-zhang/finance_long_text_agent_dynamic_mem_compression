@@ -90,6 +90,11 @@ class RetrievalConfig:
     max_routing_rounds: int = 2
     enable_domain_supplement: bool = True
     truncate_hit_content_for_context: bool = True
+    enable_agentic_rag: bool = False
+    agentic_max_iterations: int = 2
+    agentic_enable_context_refine: bool = False
+    agentic_enable_judge: bool = True
+    agentic_min_hits_per_option: int = 1
 
 
 @dataclass(frozen=True, slots=True)

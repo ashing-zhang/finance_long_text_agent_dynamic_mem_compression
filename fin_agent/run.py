@@ -113,6 +113,20 @@ def load_app_config(path: Path) -> AppConfig:
         data.get("retrieval", {}).get("truncate_hit_content_for_context", True),
         default=True,
     )
+    enable_agentic_rag = read_bool(
+        data.get("retrieval", {}).get("enable_agentic_rag", False),
+        default=False,
+    )
+    agentic_max_iterations = int(data.get("retrieval", {}).get("agentic_max_iterations", 2))
+    agentic_enable_context_refine = read_bool(
+        data.get("retrieval", {}).get("agentic_enable_context_refine", False),
+        default=False,
+    )
+    agentic_enable_judge = read_bool(
+        data.get("retrieval", {}).get("agentic_enable_judge", True),
+        default=True,
+    )
+    agentic_min_hits_per_option = int(data.get("retrieval", {}).get("agentic_min_hits_per_option", 1))
 
     log_level = str(data.get("log_level", "INFO"))
 
@@ -144,6 +158,11 @@ def load_app_config(path: Path) -> AppConfig:
         max_routing_rounds=max_routing_rounds,
         enable_domain_supplement=enable_domain_supplement,
         truncate_hit_content_for_context=truncate_hit_content_for_context,
+        enable_agentic_rag=enable_agentic_rag,
+        agentic_max_iterations=agentic_max_iterations,
+        agentic_enable_context_refine=agentic_enable_context_refine,
+        agentic_enable_judge=agentic_enable_judge,
+        agentic_min_hits_per_option=agentic_min_hits_per_option,
     )
     return AppConfig(run=run, llm=llm, retrieval=retrieval, log_level=log_level)
 

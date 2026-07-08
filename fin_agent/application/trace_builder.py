@@ -45,6 +45,7 @@ def build_question_trace(
     evidence: list[EvidenceSnippet],
     context: str,
     refine_usage: TokenUsage,
+    agentic_trace: list[dict[str, object]] | None,
     messages: list[ChatMessage],
     model_output: str,
     answer: str,
@@ -80,6 +81,8 @@ def build_question_trace(
         ],
         "evidence": summarize_evidence_hits(evidence, limit=len(evidence)),
     }
+    if agentic_trace:
+        search_trace["agentic_iterations"] = list(agentic_trace)
     answer_trace = {
         "context_chars": len(context),
         "messages": serialize_messages(messages),
