@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 def build_bm25_query(option_query: str, features: QueryFeatures) -> str:
     terms: list[str] = []
     terms.extend([item for item in features.features[:12] if item])
+    for key, value in features.feature_pairs[:8]:
+        if key:
+            terms.append(key)
+        if value:
+            terms.append(value)
+        if key and value:
+            terms.append(f"{key} {value}")
     terms.extend([item for item in features.years if item])
     terms.extend([item for item in features.numbers if item])
     terms.extend([item for item in features.clauses if item])
@@ -40,6 +47,11 @@ def build_relaxed_queries(q: Question, plan: RetrievalPlan) -> dict[str, str]:
     relaxed: dict[str, str] = {}
     feature_terms = list(plan.features.years) + list(plan.features.numbers) + list(plan.features.clauses)
     feature_terms.extend(plan.features.features[:12])
+    for key, value in plan.features.feature_pairs[:8]:
+        if key:
+            feature_terms.append(key)
+        if value:
+            feature_terms.append(value)
     feature_text = " ".join(feature_terms)
     for key in sorted(q.options.keys()):
         relaxed[key] = f"{q.options[key]} {feature_text} {expand_query_by_domain(q.domain, q.options[key])}".strip()
