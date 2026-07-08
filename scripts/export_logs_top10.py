@@ -91,7 +91,10 @@ def prune_search_trace(trace: object) -> object:
 def normalize_export_row(row: dict[str, object]) -> dict[str, object]:
     """按导出需求清理单条日志记录。"""
     normalized = dict(row)
-    normalized["search_trace_json"] = prune_search_trace(normalized.get("search_trace_json"))
+    search_trace = prune_search_trace(normalized.get("search_trace_json"))
+    normalized["search_trace_json"] = search_trace
+    if isinstance(search_trace, dict) and isinstance(search_trace.get("agentic_iterations"), list):
+        normalized["agentic_rag_json"] = search_trace.get("agentic_iterations")
     thought = normalized.get("thought_trace_json")
     if isinstance(thought, dict):
         plan = thought.get("retrieval_plan")

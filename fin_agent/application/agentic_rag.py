@@ -24,6 +24,17 @@ from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage, O
 logger = logging.getLogger(__name__)
 
 
+def serialize_query_features(features: QueryFeatures) -> dict[str, object]:
+    """将 QueryFeatures 序列化为 JSON 友好结构。"""
+    return {
+        "years": list(features.years),
+        "numbers": list(features.numbers),
+        "clauses": list(features.clauses),
+        "features": list(features.features),
+        "feature_pairs": [{"key": key, "value": value} for key, value in features.feature_pairs],
+    }
+
+
 def _normalize_feature_key(text: str) -> str:
     """清洗检索 key，避免带入 value 或噪音。"""
     raw = str(text or "").strip()
@@ -289,6 +300,7 @@ def run_agentic_rag(
         sufficient = bool(judge_payload.get("sufficient")) if isinstance(judge_payload, dict) else heuristic_sufficient
         if not sufficient and suggestions:
             updated_option_features: dict[str, QueryFeatures] = {}
+            deltas: dict[str, dict[str, object]] = {}
             for option_key in sorted(q.options.keys()):
                 base = current_plan.option_features.get(option_key) or QueryFeatures(years=(), numbers=(), clauses=(), features=(), feature_pairs=())
                 extra = suggestions.get(option_key) or QueryFeatures(years=(), numbers=(), clauses=(), features=(), feature_pairs=())
@@ -296,6 +308,7 @@ def run_agentic_rag(
                 updated_option_features[option_key] = merged
                 if (merged != base) and (extra.features or extra.feature_pairs):
                     applied_delta = True
+                deltas[option_key] = serialize_query_features(extra)
 
             updated_global = current_plan.features
             current_plan = RetrievalPlan(
@@ -304,6 +317,10 @@ def run_agentic_rag(
                 features=updated_global,
                 option_features=updated_option_features,
             )
+            merged_snapshot = {k: serialize_query_features(v) for k, v in sorted(updated_option_features.items())}
+        else:
+            deltas = {}
+            merged_snapshot = {}
 
         agentic_traces.append(
             {
@@ -314,6 +331,8 @@ def run_agentic_rag(
                 "refined_context_chars": len(refined_context),
                 "heuristic_sufficient": heuristic_sufficient,
                 "judge_payload": judge_payload if isinstance(judge_payload, dict) else None,
+                "delta_option_features": deltas,
+                "merged_option_features": merged_snapshot,
                 "applied_delta": applied_delta,
             }
         )
