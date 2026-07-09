@@ -6,7 +6,6 @@ cd "$ROOT_DIR"
 
 INPUT_PATH="${EXPORT_LOGS_INPUT:-}"
 OUTPUT_PATH="${EXPORT_LOGS_OUTPUT:-}"
-LIMIT="${EXPORT_LOGS_LIMIT:-}"
 
 ARGS=()
 if [ -n "$INPUT_PATH" ]; then
@@ -15,8 +14,6 @@ fi
 if [ -n "$OUTPUT_PATH" ]; then
   ARGS+=(--output "$OUTPUT_PATH")
 fi
-if [ -n "$LIMIT" ]; then
-  ARGS+=(--limit "$LIMIT")
-fi
 
-python -m scripts.export_logs_top10 "${ARGS[@]}" "$@"
+python -m scripts.export_logs "${ARGS[@]}" "$@"
+
