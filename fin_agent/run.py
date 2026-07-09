@@ -97,6 +97,7 @@ def load_app_config(path: Path) -> AppConfig:
 
     chunk_max_chars = int(data.get("retrieval", {}).get("chunk_max_chars", 1600))
     per_hit_max_chars = int(data.get("retrieval", {}).get("per_hit_max_chars", 360))
+    bm25_synonyms_per_feature = int(data.get("retrieval", {}).get("bm25_synonyms_per_feature", 0))
     doc_top_k = int(data.get("retrieval", {}).get("doc_top_k", 3))
     per_doc_top_k = int(data.get("retrieval", {}).get("per_doc_top_k", 3))
     per_option_top_k = int(data.get("retrieval", {}).get("per_option_top_k", 5))
@@ -148,6 +149,7 @@ def load_app_config(path: Path) -> AppConfig:
     retrieval = RetrievalConfig(
         chunk_max_chars=chunk_max_chars,
         per_hit_max_chars=per_hit_max_chars,
+        bm25_synonyms_per_feature=bm25_synonyms_per_feature,
         doc_top_k=doc_top_k,
         per_doc_top_k=per_doc_top_k,
         per_option_top_k=per_option_top_k,

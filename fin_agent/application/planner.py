@@ -7,13 +7,14 @@ from fin_agent.compat import dataclass
 
 from fin_agent.application.guardrails import extract_json_payload
 from fin_agent.application.retrieval import QueryFeatures, expand_query_by_domain, extract_query_features
-from fin_agent.application.tracing import zero_token_usage
-from fin_agent.domain.models import Question, TokenUsage
+from fin_agent.application.tracing import sum_token_usage, zero_token_usage
+from fin_agent.domain.models import Question, RetrievalConfig, TokenUsage
 from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage, OpenAiCompatibleChatClient
 
 logger = logging.getLogger(__name__)
 
 FEATURE_PROMPT_VERSION = "v6_key_value_pairs"
+BM25_SYNONYM_PROMPT_VERSION = "v1_feature_synonyms"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,7 @@ def build_retrieval_plan(
     llm: OpenAiCompatibleChatClient,
     query_feature_cache: dict[str, tuple[QueryFeatures, dict[str, QueryFeatures]]],
     q: Question,
+    retrieval: RetrievalConfig,
 ) -> tuple[RetrievalPlan, TokenUsage]:
     global_query = build_global_query(q)
     option_queries = build_option_queries(q)
@@ -37,6 +39,7 @@ def build_retrieval_plan(
         domain=q.domain,
         global_query=global_query,
         option_queries=option_queries,
+        bm25_synonyms_per_feature=max(0, int(retrieval.bm25_synonyms_per_feature)),
     )
     plan = RetrievalPlan(
         global_query=global_query,
@@ -76,10 +79,13 @@ def extract_plan_features_with_llm(
     domain: str,
     global_query: str,
     option_queries: dict[str, str],
+    bm25_synonyms_per_feature: int,
 ) -> tuple[QueryFeatures, dict[str, QueryFeatures], TokenUsage]:
     cache_key = json.dumps(
         {
             "prompt_version": FEATURE_PROMPT_VERSION,
+            "bm25_synonym_prompt_version": BM25_SYNONYM_PROMPT_VERSION,
+            "bm25_synonyms_per_feature": int(bm25_synonyms_per_feature),
             "domain": domain,
             "global_query": global_query,
             "option_queries": {k: option_queries[k] for k in sorted(option_queries.keys())},
@@ -153,8 +159,17 @@ def extract_plan_features_with_llm(
         for key in sorted(option_queries.keys()):
             item = options_payload.get(key) if isinstance(options_payload, dict) else None
             option_features[key] = parse_features_payload(item, max_features=5, max_pairs=3)
-        query_feature_cache[cache_key] = (global_features, dict(option_features))
-        return global_features, option_features, resp.usage
+
+        expanded_global, expanded_options, synonym_usage = expand_features_with_synonyms(
+            llm=llm,
+            domain=domain,
+            global_features=global_features,
+            option_features=option_features,
+            per_feature=bm25_synonyms_per_feature,
+        )
+        total_usage = sum_token_usage(resp.usage, synonym_usage)
+        query_feature_cache[cache_key] = (expanded_global, dict(expanded_options))
+        return expanded_global, expanded_options, total_usage
     except Exception as exc:
         logger.warning("LLM 特征抽取失败，回退正则：%s", repr(exc))
         global_features = extract_query_features(global_query)
@@ -235,4 +250,152 @@ def parse_features_payload(payload: object, max_features: int, max_pairs: int) -
         clauses=clauses,
         features=tuple(cleaned),
         feature_pairs=tuple(cleaned_pairs),
+    )
+
+
+def expand_features_with_synonyms(
+    llm: OpenAiCompatibleChatClient,
+    domain: str,
+    global_features: QueryFeatures,
+    option_features: dict[str, QueryFeatures],
+    per_feature: int,
+) -> tuple[QueryFeatures, dict[str, QueryFeatures], TokenUsage]:
+    if per_feature <= 0:
+        return global_features, option_features, zero_token_usage()
+
+    candidate_terms = _collect_synonym_terms(global_features=global_features, option_features=option_features)
+    if not candidate_terms:
+        return global_features, option_features, zero_token_usage()
+
+    messages = [
+        ChatMessage(
+            role="system",
+            content=(
+                "你是金融检索同义/近义表达扩展器。"
+                "你的任务是为每个字段名/术语生成同义或近义检索短语，以提升 BM25 召回。"
+                "不要生成与原术语无关的内容，不要编造具体数值或新增实体。"
+                "只输出 JSON，不要输出任何解释。"
+            ),
+        ),
+        ChatMessage(
+            role="user",
+            content=(
+                f"领域：{domain}\n"
+                f"每个术语生成 {per_feature} 条同义/近义检索短语（可少不可多）。\n"
+                "要求：\n"
+                "- 每条短语建议 2~12 字，尽量是字段别名、常见同义表达或等价说法。\n"
+                "- 不要输出整句，不要输出带主语谓语的长描述。\n"
+                "- 输出格式：\n"
+                '{ "synonyms": { "术语1": ["同义1", "同义2"], "术语2": ["..."] } }\n\n'
+                "术语列表：\n"
+                + "\n".join(candidate_terms)
+            ),
+        ),
+    ]
+
+    try:
+        resp = llm.chat(messages)
+        payload = extract_json_payload(resp.content)
+        synonyms_raw = payload.get("synonyms") if isinstance(payload, dict) else None
+        synonym_map: dict[str, list[str]] = {}
+        if isinstance(synonyms_raw, dict):
+            for key, value in synonyms_raw.items():
+                term = str(key or "").strip()
+                if term not in candidate_terms:
+                    continue
+                if not isinstance(value, list):
+                    continue
+                cleaned: list[str] = []
+                seen: set[str] = set()
+                for item in value[: per_feature * 2]:
+                    normalized = _normalize_feature_key(str(item))
+                    if not normalized:
+                        continue
+                    if normalized == term:
+                        continue
+                    if normalized in seen:
+                        continue
+                    cleaned.append(normalized)
+                    seen.add(normalized)
+                    if len(cleaned) >= per_feature:
+                        break
+                if cleaned:
+                    synonym_map[term] = cleaned
+
+        expanded_global = _apply_synonym_map(global_features, synonym_map=synonym_map, per_feature=per_feature)
+        expanded_options = {
+            option_key: _apply_synonym_map(features, synonym_map=synonym_map, per_feature=per_feature)
+            for option_key, features in option_features.items()
+        }
+        return expanded_global, expanded_options, resp.usage
+    except Exception as exc:
+        logger.warning("LLM 同义扩展失败：%s", repr(exc))
+        return global_features, option_features, zero_token_usage()
+
+
+def _collect_synonym_terms(global_features: QueryFeatures, option_features: dict[str, QueryFeatures]) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def push(value: str) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        if not _should_expand_term(text):
+            return
+        if text in seen:
+            return
+        terms.append(text)
+        seen.add(text)
+
+    for item in global_features.features:
+        push(item)
+    for key, _ in global_features.feature_pairs:
+        push(key)
+    for features in option_features.values():
+        for item in features.features:
+            push(item)
+        for key, _ in features.feature_pairs:
+            push(key)
+
+    return terms
+
+
+def _should_expand_term(term: str) -> bool:
+    normalized = str(term or "").strip()
+    if not normalized:
+        return False
+    if len(normalized) > 24:
+        return False
+    if re.search(r"\d", normalized):
+        return False
+    if re.fullmatch(r"[A-Z]{2,}", normalized):
+        return False
+    return True
+
+
+def _apply_synonym_map(features: QueryFeatures, synonym_map: dict[str, list[str]], per_feature: int) -> QueryFeatures:
+    expanded: list[str] = []
+    seen: set[str] = set()
+
+    for term in list(features.features) + [key for key, _ in features.feature_pairs]:
+        for synonym in synonym_map.get(term, [])[:per_feature]:
+            if not synonym or synonym in seen:
+                continue
+            expanded.append(synonym)
+            seen.add(synonym)
+            if len(expanded) >= 48:
+                break
+        if len(expanded) >= 48:
+            break
+
+    if not expanded:
+        return features
+    return QueryFeatures(
+        years=features.years,
+        numbers=features.numbers,
+        clauses=features.clauses,
+        features=features.features,
+        feature_pairs=features.feature_pairs,
+        expanded_terms=tuple(expanded),
     )

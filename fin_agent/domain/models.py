@@ -80,6 +80,7 @@ class RetrievalConfig:
 
     chunk_max_chars: int = 1600
     per_hit_max_chars: int = 360
+    bm25_synonyms_per_feature: int = 0
     doc_top_k: int = 3
     per_doc_top_k: int = 3
     per_option_top_k: int = 5

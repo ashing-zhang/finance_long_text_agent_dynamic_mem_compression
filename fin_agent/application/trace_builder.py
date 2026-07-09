@@ -22,6 +22,7 @@ def serialize_retrieval_plan(plan: RetrievalPlan) -> dict[str, object]:
             "numbers": list(plan.features.numbers),
             "clauses": list(plan.features.clauses),
             "features": list(plan.features.features),
+            "expanded_terms": list(plan.features.expanded_terms),
             "feature_pairs": [{"key": key, "value": value} for key, value in plan.features.feature_pairs],
         },
         "option_features": {
@@ -30,6 +31,7 @@ def serialize_retrieval_plan(plan: RetrievalPlan) -> dict[str, object]:
                 "numbers": list(features.numbers),
                 "clauses": list(features.clauses),
                 "features": list(features.features),
+                "expanded_terms": list(features.expanded_terms),
                 "feature_pairs": [{"key": key, "value": value} for key, value in features.feature_pairs],
             }
             for option_key, features in sorted(plan.option_features.items())
@@ -62,6 +64,7 @@ def build_question_trace(
             "numbers": list(plan.features.numbers),
             "clauses": list(plan.features.clauses),
             "features": list(plan.features.features),
+            "expanded_terms": list(plan.features.expanded_terms),
             "feature_pairs": [{"key": key, "value": value} for key, value in plan.features.feature_pairs],
         },
         "domain_hint": DOMAIN_PROMPT_HINTS.get(q.domain, ""),

@@ -41,6 +41,7 @@ class FinanceLongTextAgent:
             llm=self._llm,
             query_feature_cache=self._query_feature_cache,
             q=q,
+            retrieval=self._retrieval,
         )
         doc_ids = select_candidate_docs(docs=self._docs, retrieval=self._retrieval, q=q, plan=plan)
         agentic_trace = None

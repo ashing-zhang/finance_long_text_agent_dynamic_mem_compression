@@ -57,6 +57,7 @@ class QueryFeatures:
     clauses: tuple[str, ...]
     features: tuple[str, ...]
     feature_pairs: tuple[tuple[str, str], ...]
+    expanded_terms: tuple[str, ...] = ()
 
 
 def extract_query_features(text: str) -> QueryFeatures:
@@ -74,7 +75,7 @@ def extract_query_features(text: str) -> QueryFeatures:
     )
     clauses = tuple(sorted(set(re.findall(r"第[一二三四五六七八九十百千万0-9]+[条章节款]", normalized))))
     features = tuple(sorted(set(extract_keywords(normalized))))
-    return QueryFeatures(years=years, numbers=numbers, clauses=clauses, features=features, feature_pairs=())
+    return QueryFeatures(years=years, numbers=numbers, clauses=clauses, features=features, feature_pairs=(), expanded_terms=())
 
 
 def extract_keywords(text: str) -> list[str]:

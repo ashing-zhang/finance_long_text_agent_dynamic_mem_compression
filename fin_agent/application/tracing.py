@@ -78,7 +78,7 @@ def summarize_evidence_hits(items: list[EvidenceSnippet], limit: int) -> list[di
             "chunk_id": item.chunk_id,
             "score": round(float(item.score), 4),
             "option_key": item.option_key,
-            "content_preview": truncate_text(item.content, max_chars=240),
+            "content": (item.content or "").strip(),
         }
         for item in items[:limit]
     ]
