@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 
-from fin_agent.application.domain_specialists import build_domain_supplement
-from fin_agent.application.planner import RetrievalPlan
-from fin_agent.application.retrieval import DOMAIN_PROMPT_HINTS
-from fin_agent.application.tracing import zero_token_usage
+from fin_agent.application.context.domain_specialists import build_domain_supplement
+from fin_agent.application.retrieval.planner import RetrievalPlan
+from fin_agent.application.retrieval.retrieval import DOMAIN_PROMPT_HINTS
+from fin_agent.application.tracing.tracing import zero_token_usage
 from fin_agent.domain.models import EvidenceSnippet, Question, RetrievalConfig, TokenUsage
 from fin_agent.infrastructure.data_access import DocumentRepository
 from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage, OpenAiCompatibleChatClient

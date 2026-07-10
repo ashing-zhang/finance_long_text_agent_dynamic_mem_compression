@@ -5,9 +5,9 @@ import logging
 import re
 from fin_agent.compat import dataclass
 
-from fin_agent.application.guardrails import extract_json_payload
-from fin_agent.application.retrieval import QueryFeatures, expand_query_by_domain, extract_query_features
-from fin_agent.application.tracing import sum_token_usage, zero_token_usage
+from fin_agent.application.processing.guardrails import extract_json_payload
+from fin_agent.application.retrieval.retrieval import QueryFeatures, expand_query_by_domain, extract_query_features
+from fin_agent.application.tracing.tracing import sum_token_usage, zero_token_usage
 from fin_agent.domain.models import Question, RetrievalConfig, TokenUsage
 from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage, OpenAiCompatibleChatClient
 

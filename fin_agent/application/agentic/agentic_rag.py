@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import logging
 
-from fin_agent.application.context_builder import build_context, refine_context_with_llm
-from fin_agent.application.guardrails import extract_json_payload
-from fin_agent.application.planner import RetrievalPlan
-from fin_agent.application.retrieval import QueryFeatures
-from fin_agent.application.retrieval_pipeline import retrieve_evidence
-from fin_agent.application.tracing import RetrievalTrace, sum_token_usage, zero_token_usage
+from fin_agent.application.context.context_builder import build_context, refine_context_with_llm
+from fin_agent.application.processing.guardrails import extract_json_payload
+from fin_agent.application.retrieval.planner import RetrievalPlan
+from fin_agent.application.retrieval.retrieval import QueryFeatures
+from fin_agent.application.retrieval.retrieval_pipeline import retrieve_evidence
+from fin_agent.application.tracing.tracing import RetrievalTrace, sum_token_usage, zero_token_usage
 from fin_agent.domain.models import EvidenceSnippet, Question, RetrievalConfig, TokenUsage
 from fin_agent.infrastructure.data_access import DocumentRepository
 from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage, OpenAiCompatibleChatClient

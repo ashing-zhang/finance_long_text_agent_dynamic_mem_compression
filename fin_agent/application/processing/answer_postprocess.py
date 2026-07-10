@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fin_agent.application.guardrails import extract_json_payload, normalize_answer_letters
+from fin_agent.application.processing.guardrails import extract_json_payload, normalize_answer_letters
 from fin_agent.domain.models import AnswerFormat
 
 

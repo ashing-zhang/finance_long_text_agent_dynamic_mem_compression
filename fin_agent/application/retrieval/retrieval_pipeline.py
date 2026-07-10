@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from fin_agent.application.planner import RetrievalPlan
-from fin_agent.application.retrieval import (
+from fin_agent.application.retrieval.planner import RetrievalPlan
+from fin_agent.application.retrieval.retrieval import (
     QueryFeatures,
     adjust_chunk_size,
     bm25_rank,
@@ -16,7 +16,7 @@ from fin_agent.application.retrieval import (
     extract_query_features,
     focus_chunk_content,
 )
-from fin_agent.application.tracing import (
+from fin_agent.application.tracing.tracing import (
     RetrievalRoundTrace,
     RetrievalTrace,
     summarize_evidence_hits,

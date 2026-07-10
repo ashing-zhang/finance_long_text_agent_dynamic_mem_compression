@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from fin_agent.application.planner import RetrievalPlan
-from fin_agent.application.retrieval import DOMAIN_PROMPT_HINTS
-from fin_agent.application.tracing import summarize_evidence_hits, token_usage_to_dict
+from fin_agent.application.retrieval.retrieval import DOMAIN_PROMPT_HINTS
+from fin_agent.application.tracing.tracing import summarize_evidence_hits, token_usage_to_dict
 from fin_agent.domain.models import EvidenceSnippet, Question, TokenUsage
 from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage
-from fin_agent.application.tracing import QuestionTrace, RetrievalTrace
+from fin_agent.application.tracing.tracing import QuestionTrace, RetrievalTrace
 
 
 def serialize_messages(messages: list[ChatMessage]) -> list[dict[str, str]]:
@@ -13,7 +12,8 @@ def serialize_messages(messages: list[ChatMessage]) -> list[dict[str, str]]:
     return [{"role": message.role, "content": message.content} for message in messages]
 
 
-def serialize_retrieval_plan(plan: RetrievalPlan) -> dict[str, object]:
+def serialize_retrieval_plan(plan: "RetrievalPlan") -> dict[str, object]:
+    from fin_agent.application.retrieval.planner import RetrievalPlan
     return {
         "global_query": plan.global_query,
         "option_queries": dict(plan.option_queries),
@@ -41,7 +41,7 @@ def serialize_retrieval_plan(plan: RetrievalPlan) -> dict[str, object]:
 
 def build_question_trace(
     q: Question,
-    plan: RetrievalPlan,
+    plan: "RetrievalPlan",
     doc_ids: list[str],
     retrieval_trace: RetrievalTrace,
     evidence: list[EvidenceSnippet],

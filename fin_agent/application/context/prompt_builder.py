@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fin_agent.application.retrieval import DOMAIN_PROMPT_HINTS, build_domain_reasoning_instruction
+from fin_agent.application.retrieval.retrieval import DOMAIN_PROMPT_HINTS, build_domain_reasoning_instruction
 from fin_agent.domain.models import AnswerFormat, Question
 from fin_agent.infrastructure.llm.openai_compatible_client import ChatMessage
 

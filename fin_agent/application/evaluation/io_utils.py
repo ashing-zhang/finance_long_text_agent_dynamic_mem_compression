@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 
 from fin_agent.domain.models import AnswerRecord, EvidenceSnippet, Question
-from fin_agent.application.tracing import QuestionTrace
+from fin_agent.application.tracing.tracing import QuestionTrace
 
 logger = logging.getLogger(__name__)
 
