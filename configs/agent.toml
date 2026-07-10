@@ -16,8 +16,8 @@ timeout_seconds = 120.0
 max_retries = 2
 
 [retrieval]
-chunk_max_chars = 300
-per_hit_max_chars = 300
+chunk_max_chars = 1000
+per_hit_max_chars = 1000
 bm25_synonyms_per_feature = 3
 enable_symbolic_boost = false
 enable_domain_specific_boost = false
@@ -30,8 +30,8 @@ grep_prefilter_max_chunks_per_doc = 256
 grep_terms_per_query = 16
 grep_context_window = 120
 doc_top_k = 3
-per_doc_top_k = 5
-per_option_top_k = 5
+per_doc_top_k = 3
+per_option_top_k = 3
 top_k_chunks = 12
 coarse_doc_window_chars = 2400
 refine_context_chars = 12000
