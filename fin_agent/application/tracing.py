@@ -17,6 +17,7 @@ class RetrievalRoundTrace:
     round_index: int
     query_mode: str
     option_queries: dict[str, str]
+    literal_terms: dict[str, list[str]]
     hit_count: int
     top_hits: list[dict[str, object]]
     option_doc_hits: dict[str, dict[str, dict[str, object]]]

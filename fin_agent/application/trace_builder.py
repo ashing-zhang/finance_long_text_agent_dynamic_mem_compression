@@ -78,6 +78,7 @@ def build_question_trace(
                 "round_index": item.round_index,
                 "query_mode": item.query_mode,
                 "option_queries": item.option_queries,
+                "literal_terms": item.literal_terms,
                 "hit_count": item.hit_count,
             }
             for item in retrieval_trace.rounds

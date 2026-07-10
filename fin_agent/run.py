@@ -98,6 +98,12 @@ def load_app_config(path: Path) -> AppConfig:
     chunk_max_chars = int(data.get("retrieval", {}).get("chunk_max_chars", 1600))
     per_hit_max_chars = int(data.get("retrieval", {}).get("per_hit_max_chars", 360))
     bm25_synonyms_per_feature = int(data.get("retrieval", {}).get("bm25_synonyms_per_feature", 0))
+    enable_grep_retrieval = read_bool(
+        data.get("retrieval", {}).get("enable_grep_retrieval", True),
+        default=True,
+    )
+    grep_terms_per_query = int(data.get("retrieval", {}).get("grep_terms_per_query", 16))
+    grep_context_window = int(data.get("retrieval", {}).get("grep_context_window", 120))
     doc_top_k = int(data.get("retrieval", {}).get("doc_top_k", 3))
     per_doc_top_k = int(data.get("retrieval", {}).get("per_doc_top_k", 3))
     per_option_top_k = int(data.get("retrieval", {}).get("per_option_top_k", 5))
@@ -150,6 +156,9 @@ def load_app_config(path: Path) -> AppConfig:
         chunk_max_chars=chunk_max_chars,
         per_hit_max_chars=per_hit_max_chars,
         bm25_synonyms_per_feature=bm25_synonyms_per_feature,
+        enable_grep_retrieval=enable_grep_retrieval,
+        grep_terms_per_query=grep_terms_per_query,
+        grep_context_window=grep_context_window,
         doc_top_k=doc_top_k,
         per_doc_top_k=per_doc_top_k,
         per_option_top_k=per_option_top_k,

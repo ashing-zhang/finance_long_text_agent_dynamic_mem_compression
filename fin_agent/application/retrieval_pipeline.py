@@ -7,7 +7,9 @@ from fin_agent.application.retrieval import (
     QueryFeatures,
     adjust_chunk_size,
     bm25_rank,
+    collect_grep_terms,
     compute_domain_specific_boost,
+    compute_grep_style_boost,
     compute_symbolic_boost,
     expand_query_by_domain,
     extract_query_features,
@@ -88,6 +90,15 @@ def select_candidate_docs(docs: DocumentRepository, retrieval: RetrievalConfig, 
         return []
 
     rankings = bm25_rank(query=plan.global_query, chunks=profiles)
+    grep_terms = (
+        collect_grep_terms(
+            query=plan.global_query,
+            features=plan.features,
+            limit=retrieval.grep_terms_per_query,
+        )
+        if retrieval.enable_grep_retrieval
+        else ()
+    )
     scored_doc_ids: list[tuple[str, float]] = []
     for index, score in rankings:
         doc_id = valid_doc_ids[index]
@@ -98,6 +109,12 @@ def select_candidate_docs(docs: DocumentRepository, retrieval: RetrievalConfig, 
             features=plan.features,
             domain=q.domain,
         )
+        if grep_terms:
+            boosted += compute_grep_style_boost(
+                text=profile_text,
+                title=doc_id,
+                terms=grep_terms,
+            )
         scored_doc_ids.append((doc_id, boosted))
     scored_doc_ids.sort(key=lambda item: item[1], reverse=True)
     return [doc_id for doc_id, _ in scored_doc_ids[: retrieval.doc_top_k]]
@@ -116,6 +133,18 @@ def retrieve_evidence(
 
     for round_index in range(retrieval.max_routing_rounds):
         option_queries = plan.option_queries if round_index == 0 else relaxed_queries
+        literal_terms = {
+            option_key: list(
+                collect_grep_terms(
+                    query=option_query,
+                    features=(plan.option_features.get(option_key) or extract_query_features(option_query)),
+                    limit=retrieval.grep_terms_per_query,
+                )
+            )
+            if retrieval.enable_grep_retrieval
+            else []
+            for option_key, option_query in option_queries.items()
+        }
         bm25_queries = {
             option_key: build_bm25_query(
                 option_query=option_query,
@@ -131,12 +160,14 @@ def retrieve_evidence(
             option_queries=option_queries,
             bm25_queries=bm25_queries,
             option_features=plan.option_features,
+            literal_terms=literal_terms,
         )
         round_traces.append(
             RetrievalRoundTrace(
                 round_index=round_index + 1,
                 query_mode=("planned" if round_index == 0 else "relaxed"),
                 option_queries=dict(bm25_queries),
+                literal_terms={key: list(value) for key, value in literal_terms.items()},
                 hit_count=len(current_hits),
                 top_hits=summarize_hits_by_option_doc_flat(
                     items=current_hits,
@@ -190,12 +221,14 @@ def retrieve_round(
     option_queries: dict[str, str],
     bm25_queries: dict[str, str],
     option_features: dict[str, QueryFeatures],
+    literal_terms: dict[str, list[str]],
 ) -> list[EvidenceSnippet]:
     results: list[EvidenceSnippet] = []
     cached_chunks: dict[str, list] = {}
     for option_key, option_query in option_queries.items():
         option_feature = option_features.get(option_key) or extract_query_features(option_query)
         bm25_query = bm25_queries.get(option_key) or build_bm25_query(option_query=option_query, features=option_feature)
+        grep_terms = tuple(literal_terms.get(option_key) or ())
 
         for doc_id in doc_ids:
             chunks = cached_chunks.get(doc_id)
@@ -233,10 +266,18 @@ def retrieve_round(
                     text=chunk.content,
                     features=option_feature,
                 )
+                if grep_terms:
+                    boosted += compute_grep_style_boost(
+                        text=chunk.content,
+                        title=chunk.title,
+                        terms=grep_terms,
+                    )
                 focused_content = focus_chunk_content(
                     domain=q.domain,
                     option_text=q.options[option_key],
                     text=chunk.content,
+                    grep_terms=grep_terms,
+                    grep_context_window=retrieval.grep_context_window,
                 )
                 per_tuple.append(
                     EvidenceSnippet(

@@ -168,6 +168,188 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+
+def _is_high_signal_grep_term(term: str) -> bool:
+    normalized = normalize_text(term)
+    if not normalized:
+        return False
+    if len(normalized) > 64:
+        return False
+    if normalized in {"根据", "下列", "哪些", "是否", "有关", "要求", "规定", "说法", "描述"}:
+        return False
+    if any(normalized.startswith(prefix) for prefix in ("是否", "根据", "下列", "哪个", "哪些", "何种", "关于")):
+        return False
+    if re.fullmatch(r"(?:19|20)\d{2}年?|第[一二三四五六七八九十百千万0-9]+[条章节款]", normalized):
+        return True
+    if re.search(r"\d", normalized):
+        return len(normalized) >= 2
+    if _contains_cjk(normalized):
+        compact = normalized.replace(" ", "")
+        return 2 <= len(compact) <= 10
+    return len(normalized) >= 3
+
+
+def _grep_term_weight(term: str) -> float:
+    normalized = normalize_text(term)
+    if re.fullmatch(r"第[一二三四五六七八九十百千万0-9]+[条章节款]", normalized):
+        return 2.4
+    if re.fullmatch(r"(?:19|20)\d{2}年?", normalized):
+        return 1.8
+    if re.search(r"\d", normalized):
+        return 1.4
+    if len(normalized) >= 6:
+        return 1.2
+    return 1.0
+
+
+def collect_grep_terms(query: str, features: QueryFeatures, *, limit: int) -> tuple[str, ...]:
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def push(value: str) -> None:
+        normalized = normalize_text(str(value or ""))
+        if not normalized:
+            return
+        if normalized in seen:
+            return
+        if not _is_high_signal_grep_term(normalized):
+            return
+        terms.append(normalized)
+        seen.add(normalized)
+
+    for item in features.clauses:
+        push(item)
+    for item in features.years:
+        push(item)
+    for item in features.numbers:
+        push(item)
+    for key, value in features.feature_pairs[:8]:
+        push(key)
+        push(value)
+        if key and value:
+            push(f"{key} {value}")
+            if _contains_cjk(key) and _contains_cjk(value):
+                push(f"{key}{value}")
+    for item in features.features[:12]:
+        push(item)
+    for item in features.expanded_terms[:48]:
+        push(item)
+    for item in re.findall(r"[\u4e00-\u9fff]{2,16}|[a-zA-Z0-9_]{3,}", normalize_text(query)):
+        push(item)
+
+    return tuple(terms[: max(1, int(limit))])
+
+
+def compute_grep_style_boost(text: str, title: str, terms: tuple[str, ...] | list[str]) -> float:
+    normalized_text = normalize_text(text)
+    normalized_title = normalize_text(title)
+    if not normalized_text and not normalized_title:
+        return 0.0
+
+    score = 0.0
+    distinct_hits = 0
+    for term in terms:
+        normalized = normalize_text(term)
+        if not normalized:
+            continue
+        title_hits = normalized_title.count(normalized)
+        text_hits = normalized_text.count(normalized)
+        if title_hits <= 0 and text_hits <= 0:
+            continue
+        distinct_hits += 1
+        weight = _grep_term_weight(normalized)
+        score += min(title_hits, 2) * (0.45 * weight)
+        score += min(text_hits, 3) * (0.3 * weight)
+        if title_hits > 0 and text_hits > 0:
+            score += 0.18 * weight
+
+    if distinct_hits >= 2:
+        score += min(0.9, distinct_hits * 0.15)
+    return score
+
+
+def extract_grep_focus(text: str, terms: tuple[str, ...] | list[str], *, context_window: int, max_chars: int) -> str:
+    source = text or ""
+    if not source:
+        return ""
+
+    spans: list[tuple[int, int]] = []
+    for term in terms:
+        normalized = normalize_text(term)
+        if not normalized:
+            continue
+        start = 0
+        captured = 0
+        while captured < 2:
+            index = source.find(normalized, start)
+            if index < 0:
+                break
+            spans.append(
+                (
+                    max(0, index - max(20, int(context_window))),
+                    min(len(source), index + len(normalized) + max(20, int(context_window))),
+                )
+            )
+            start = index + len(normalized)
+            captured += 1
+        if len(spans) >= 6:
+            break
+
+    if not spans:
+        return ""
+
+    spans.sort(key=lambda item: item[0])
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if not merged or start > merged[-1][1] + 20:
+            merged.append((start, end))
+            continue
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+
+    pieces: list[str] = []
+    total = 0
+    for start, end in merged:
+        snippet = source[start:end].strip()
+        if not snippet:
+            continue
+        if start > 0:
+            snippet = f"...{snippet}"
+        if end < len(source):
+            snippet = f"{snippet}..."
+        remaining = max_chars - total
+        if remaining <= 0:
+            break
+        if len(snippet) > remaining:
+            snippet = snippet[:remaining].rstrip()
+        pieces.append(snippet)
+        total += len(snippet) + 1
+        if total >= max_chars:
+            break
+    return "\n".join(pieces).strip()
+
+
+def _merge_focus_content(*parts: str, max_chars: int) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    for part in parts:
+        normalized = (part or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        remaining = max_chars - total
+        if remaining <= 0:
+            break
+        if len(normalized) > remaining:
+            normalized = normalized[:remaining].rstrip()
+        merged.append(normalized)
+        seen.add(normalized)
+        total += len(normalized) + 1
+    return "\n".join(merged).strip()
+
+
 def _read_bool_env(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -388,14 +570,27 @@ def compute_domain_specific_boost(
     return score
 
 
-def focus_chunk_content(domain: str, option_text: str, text: str) -> str:
+def focus_chunk_content(
+    domain: str,
+    option_text: str,
+    text: str,
+    *,
+    grep_terms: tuple[str, ...] | list[str] = (),
+    grep_context_window: int = 120,
+) -> str:
+    grep_focus = extract_grep_focus(
+        text=text,
+        terms=grep_terms,
+        context_window=grep_context_window,
+        max_chars=900,
+    )
     if domain == "financial_reports":
         focused = extract_financial_report_focus(option_text=option_text, text=text)
-        return focused or text
+        return _merge_focus_content(grep_focus, focused, max_chars=900) or text
     if domain == "insurance":
         focused = extract_insurance_focus(option_text=option_text, text=text)
-        return focused or text
-    return text
+        return _merge_focus_content(grep_focus, focused, max_chars=900) or text
+    return grep_focus or text
 
 
 def extract_years_from_text(text: str) -> list[str]:
