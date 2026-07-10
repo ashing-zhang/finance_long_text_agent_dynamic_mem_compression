@@ -81,7 +81,14 @@ class RetrievalConfig:
     chunk_max_chars: int = 1600
     per_hit_max_chars: int = 360
     bm25_synonyms_per_feature: int = 0
+    enable_symbolic_boost: bool = True
+    enable_domain_specific_boost: bool = True
+    enable_grep_boost: bool = True
     enable_grep_retrieval: bool = True
+    enable_grep_prefilter: bool = False
+    grep_prefilter_min_hits: int = 1
+    grep_prefilter_max_docs: int = 256
+    grep_prefilter_max_chunks_per_doc: int = 256
     grep_terms_per_query: int = 16
     grep_context_window: int = 120
     doc_top_k: int = 3

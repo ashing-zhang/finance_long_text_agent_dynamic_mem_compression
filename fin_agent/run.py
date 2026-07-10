@@ -98,10 +98,29 @@ def load_app_config(path: Path) -> AppConfig:
     chunk_max_chars = int(data.get("retrieval", {}).get("chunk_max_chars", 1600))
     per_hit_max_chars = int(data.get("retrieval", {}).get("per_hit_max_chars", 360))
     bm25_synonyms_per_feature = int(data.get("retrieval", {}).get("bm25_synonyms_per_feature", 0))
+    enable_symbolic_boost = read_bool(
+        data.get("retrieval", {}).get("enable_symbolic_boost", True),
+        default=True,
+    )
+    enable_domain_specific_boost = read_bool(
+        data.get("retrieval", {}).get("enable_domain_specific_boost", True),
+        default=True,
+    )
+    enable_grep_boost = read_bool(
+        data.get("retrieval", {}).get("enable_grep_boost", True),
+        default=True,
+    )
     enable_grep_retrieval = read_bool(
         data.get("retrieval", {}).get("enable_grep_retrieval", True),
         default=True,
     )
+    enable_grep_prefilter = read_bool(
+        data.get("retrieval", {}).get("enable_grep_prefilter", False),
+        default=False,
+    )
+    grep_prefilter_min_hits = int(data.get("retrieval", {}).get("grep_prefilter_min_hits", 1))
+    grep_prefilter_max_docs = int(data.get("retrieval", {}).get("grep_prefilter_max_docs", 256))
+    grep_prefilter_max_chunks_per_doc = int(data.get("retrieval", {}).get("grep_prefilter_max_chunks_per_doc", 256))
     grep_terms_per_query = int(data.get("retrieval", {}).get("grep_terms_per_query", 16))
     grep_context_window = int(data.get("retrieval", {}).get("grep_context_window", 120))
     doc_top_k = int(data.get("retrieval", {}).get("doc_top_k", 3))
@@ -156,7 +175,14 @@ def load_app_config(path: Path) -> AppConfig:
         chunk_max_chars=chunk_max_chars,
         per_hit_max_chars=per_hit_max_chars,
         bm25_synonyms_per_feature=bm25_synonyms_per_feature,
+        enable_symbolic_boost=enable_symbolic_boost,
+        enable_domain_specific_boost=enable_domain_specific_boost,
+        enable_grep_boost=enable_grep_boost,
         enable_grep_retrieval=enable_grep_retrieval,
+        enable_grep_prefilter=enable_grep_prefilter,
+        grep_prefilter_min_hits=grep_prefilter_min_hits,
+        grep_prefilter_max_docs=grep_prefilter_max_docs,
+        grep_prefilter_max_chunks_per_doc=grep_prefilter_max_chunks_per_doc,
         grep_terms_per_query=grep_terms_per_query,
         grep_context_window=grep_context_window,
         doc_top_k=doc_top_k,

@@ -271,6 +271,24 @@ def compute_grep_style_boost(text: str, title: str, terms: tuple[str, ...] | lis
     return score
 
 
+def compute_literal_hit_count(text: str, title: str, terms: tuple[str, ...] | list[str]) -> int:
+    normalized_text = normalize_text(text)
+    normalized_title = normalize_text(title)
+    if not normalized_text and not normalized_title:
+        return 0
+
+    hits = 0
+    for term in terms:
+        normalized = normalize_text(term)
+        if not normalized:
+            continue
+        if normalized in normalized_title:
+            hits += 2
+        if normalized in normalized_text:
+            hits += 1
+    return hits
+
+
 def extract_grep_focus(text: str, terms: tuple[str, ...] | list[str], *, context_window: int, max_chars: int) -> str:
     source = text or ""
     if not source:

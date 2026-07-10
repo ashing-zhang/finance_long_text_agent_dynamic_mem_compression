@@ -9,6 +9,7 @@ from fin_agent.application.retrieval import (
     bm25_rank,
     collect_grep_terms,
     compute_domain_specific_boost,
+    compute_literal_hit_count,
     compute_grep_style_boost,
     compute_symbolic_boost,
     expand_query_by_domain,
@@ -89,7 +90,6 @@ def select_candidate_docs(docs: DocumentRepository, retrieval: RetrievalConfig, 
     if not profiles:
         return []
 
-    rankings = bm25_rank(query=plan.global_query, chunks=profiles)
     grep_terms = (
         collect_grep_terms(
             query=plan.global_query,
@@ -99,17 +99,35 @@ def select_candidate_docs(docs: DocumentRepository, retrieval: RetrievalConfig, 
         if retrieval.enable_grep_retrieval
         else ()
     )
+    ranked_profiles = profiles
+    ranked_doc_ids = valid_doc_ids
+    if retrieval.enable_grep_prefilter and grep_terms:
+        scored: list[tuple[int, int]] = []
+        for idx, profile_text in enumerate(profiles):
+            hits = compute_literal_hit_count(profile_text, valid_doc_ids[idx], grep_terms)
+            if hits >= max(1, int(retrieval.grep_prefilter_min_hits)):
+                scored.append((hits, idx))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        cap = max(1, int(retrieval.grep_prefilter_max_docs))
+        kept_indices = [idx for _, idx in scored[:cap]]
+        if kept_indices:
+            ranked_profiles = [profiles[idx] for idx in kept_indices]
+            ranked_doc_ids = [valid_doc_ids[idx] for idx in kept_indices]
+
+    rankings = bm25_rank(query=plan.global_query, chunks=ranked_profiles)
     scored_doc_ids: list[tuple[str, float]] = []
     for index, score in rankings:
-        doc_id = valid_doc_ids[index]
-        profile_text = profiles[index]
-        boosted = score + compute_symbolic_boost(
-            text=profile_text,
-            title=doc_id,
-            features=plan.features,
-            domain=q.domain,
-        )
-        if grep_terms:
+        doc_id = ranked_doc_ids[index]
+        profile_text = ranked_profiles[index]
+        boosted = score
+        if retrieval.enable_symbolic_boost:
+            boosted += compute_symbolic_boost(
+                text=profile_text,
+                title=doc_id,
+                features=plan.features,
+                domain=q.domain,
+            )
+        if retrieval.enable_grep_boost and grep_terms:
             boosted += compute_grep_style_boost(
                 text=profile_text,
                 title=doc_id,
@@ -248,25 +266,42 @@ def retrieve_round(
                 continue
 
             per_tuple: list[EvidenceSnippet] = []
-            ranking_texts = [chunk.to_index_text() for chunk in chunks]
+            candidate_chunks = chunks
+            if retrieval.enable_grep_prefilter and grep_terms:
+                scored_chunks: list[tuple[int, object]] = []
+                threshold = max(1, int(retrieval.grep_prefilter_min_hits))
+                for chunk in chunks:
+                    hits = compute_literal_hit_count(chunk.content, chunk.title, grep_terms)
+                    if hits >= threshold:
+                        scored_chunks.append((hits, chunk))
+                scored_chunks.sort(key=lambda item: item[0], reverse=True)
+                cap = max(1, int(retrieval.grep_prefilter_max_chunks_per_doc))
+                filtered = [chunk for _, chunk in scored_chunks[:cap]]
+                if filtered:
+                    candidate_chunks = filtered
+
+            ranking_texts = [chunk.to_index_text() for chunk in candidate_chunks]
             rankings = bm25_rank(query=bm25_query, chunks=ranking_texts)
             for index, base_score in rankings:
-                chunk = chunks[index]
-                boosted = base_score + compute_symbolic_boost(
-                    text=chunk.content,
-                    title=chunk.title,
-                    features=option_feature,
-                    domain=q.domain,
-                )
-                boosted += compute_domain_specific_boost(
-                    domain=q.domain,
-                    option_text=q.options[option_key],
-                    doc_id=chunk.doc_id,
-                    title=chunk.title,
-                    text=chunk.content,
-                    features=option_feature,
-                )
-                if grep_terms:
+                chunk = candidate_chunks[index]
+                boosted = base_score
+                if retrieval.enable_symbolic_boost:
+                    boosted += compute_symbolic_boost(
+                        text=chunk.content,
+                        title=chunk.title,
+                        features=option_feature,
+                        domain=q.domain,
+                    )
+                if retrieval.enable_domain_specific_boost:
+                    boosted += compute_domain_specific_boost(
+                        domain=q.domain,
+                        option_text=q.options[option_key],
+                        doc_id=chunk.doc_id,
+                        title=chunk.title,
+                        text=chunk.content,
+                        features=option_feature,
+                    )
+                if retrieval.enable_grep_boost and grep_terms:
                     boosted += compute_grep_style_boost(
                         text=chunk.content,
                         title=chunk.title,
